@@ -2140,6 +2140,7 @@ private let promptWizardCommonLanguages: [PromptWizardLanguageOption] = [
     .init(code: "pt", name: "Portuguese")
 ]
 
+@MainActor
 private func promptWizardLanguagePicker(title: String, selection: Binding<String>) -> some View {
     VStack(alignment: .leading, spacing: 6) {
         Text(title)
@@ -2155,6 +2156,7 @@ private func promptWizardLanguagePicker(title: String, selection: Binding<String
     }
 }
 
+@MainActor
 private func promptWizardTonePicker(tone: Binding<PromptWizardTone>) -> some View {
     VStack(alignment: .leading, spacing: 6) {
         Text(localizedAppText("Tone", de: "Ton"))
@@ -2172,6 +2174,7 @@ private func promptWizardTonePicker(tone: Binding<PromptWizardTone>) -> some Vie
     }
 }
 
+@MainActor
 private func promptWizardLanguageModeSection(
     mode: Binding<PromptWizardLanguageChoice>,
     targetLanguage: Binding<String>
@@ -2192,6 +2195,7 @@ private func promptWizardLanguageModeSection(
     }
 }
 
+@MainActor
 private func promptWizardCompactSection<Content: View>(
     title: String,
     description: String? = nil,
@@ -2217,6 +2221,7 @@ private func promptWizardCompactSection<Content: View>(
     }
 }
 
+@MainActor
 private func promptWizardEditorSubsection<Content: View>(
     title: String,
     description: String? = nil,
@@ -2240,6 +2245,7 @@ private func promptWizardEditorSubsection<Content: View>(
     }
 }
 
+@MainActor
 private func promptWizardInfoChip(_ text: String, tint: Color) -> some View {
     Text(text)
         .font(.caption.weight(.semibold))
@@ -2257,6 +2263,7 @@ private func promptWizardActiveSelectionFill() -> some ShapeStyle {
     Color.accentColor
 }
 
+@MainActor
 private func promptWizardElevatedPanel(cornerRadius: CGFloat) -> some View {
     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .fill(Color(nsColor: .controlBackgroundColor).opacity(0.98))
@@ -2268,6 +2275,7 @@ private func promptWizardElevatedPanel(cornerRadius: CGFloat) -> some View {
         .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
 }
 
+@MainActor
 private func promptWizardGroupedListSurface(cornerRadius: CGFloat) -> some View {
     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .fill(Color.white.opacity(0.022))

@@ -666,7 +666,7 @@ final class LicenseService: ObservableObject {
 
     // MARK: - Polar API
 
-    private func withRetry<T>(_ operation: () async throws -> T) async throws -> T {
+    private func withRetry<T>(_ operation: () async throws -> sending T) async throws -> sending T {
         do {
             return try await operation()
         } catch let error as NSError where error.domain == NSURLErrorDomain && error.code == NSURLErrorNetworkConnectionLost {

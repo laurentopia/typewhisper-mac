@@ -11,8 +11,8 @@ protocol ProcessActivityManaging {
     func withActivity<T>(
         options: ProcessInfo.ActivityOptions,
         reason: String,
-        operation: () async throws -> T
-    ) async rethrows -> T
+        operation: () async throws -> sending T
+    ) async rethrows -> sending T
 }
 
 @MainActor
@@ -25,8 +25,8 @@ struct DefaultProcessActivityManager: ProcessActivityManaging {
     func withActivity<T>(
         options: ProcessInfo.ActivityOptions,
         reason: String,
-        operation: () async throws -> T
-    ) async rethrows -> T {
+        operation: () async throws -> sending T
+    ) async rethrows -> sending T {
         let activity = ProcessInfo.processInfo.beginActivity(options: options, reason: reason)
         defer {
             ProcessInfo.processInfo.endActivity(activity)
@@ -336,8 +336,8 @@ class PromptProcessingService: ObservableObject {
     private func withProcessActivityIfNeeded<T>(
         for plugin: any LLMProviderPlugin,
         providerId: String,
-        operation: () async throws -> T
-    ) async throws -> T {
+        operation: () async throws -> sending T
+    ) async throws -> sending T {
         guard Self.requiresProcessActivityBudget(for: plugin) else {
             return try await operation()
         }

@@ -1251,6 +1251,7 @@ private struct HostingSummaryInline: View {
     }
 }
 
+@MainActor
 private func integrationGroupedSurface(cornerRadius: CGFloat) -> some View {
     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .fill(Color(nsColor: .controlBackgroundColor))

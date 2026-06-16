@@ -2964,6 +2964,7 @@ private func workflowNormalizedDomain(_ value: String) -> String {
     return trimmed
 }
 
+@MainActor
 private func workflowsElevatedPanel(cornerRadius: CGFloat) -> some View {
     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .fill(Color(nsColor: .windowBackgroundColor))
@@ -2974,6 +2975,7 @@ private func workflowsElevatedPanel(cornerRadius: CGFloat) -> some View {
         )
 }
 
+@MainActor
 private func workflowsGroupedSurface(cornerRadius: CGFloat) -> some View {
     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .fill(Color(nsColor: .controlBackgroundColor))

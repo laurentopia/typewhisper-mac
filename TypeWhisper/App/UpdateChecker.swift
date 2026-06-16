@@ -8,9 +8,9 @@ struct UpdateChecker: Sendable {
     static func sparkle(_ updater: SPUUpdater) -> UpdateChecker {
         nonisolated(unsafe) let updater = updater
         return UpdateChecker(
-            canCheckForUpdates: { updater.canCheckForUpdates },
-            checkForUpdates: { updater.checkForUpdates() },
-            resetUpdateCycleAfterSettingsChange: { updater.resetUpdateCycleAfterShortDelay() }
+            canCheckForUpdates: { MainActor.assumeIsolated { updater.canCheckForUpdates } },
+            checkForUpdates: { MainActor.assumeIsolated { updater.checkForUpdates() } },
+            resetUpdateCycleAfterSettingsChange: { MainActor.assumeIsolated { updater.resetUpdateCycleAfterShortDelay() } }
         )
     }
 

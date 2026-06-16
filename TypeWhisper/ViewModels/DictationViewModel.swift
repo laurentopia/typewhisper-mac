@@ -2189,7 +2189,14 @@ func classifyShortSpeech(
         return .transcribe
     }
 
-    if peakLevel < 0.006 { return .discardNoSpeech }
+    // Under CPU contention the audio tap can be starved, so the measured peak reads low even when
+    // the user spoke for a while. Hard-discarding here is the "widget shows up, then closes thinking
+    // it heard nothing" bug. A held, multi-second recording is almost never true silence, so bias
+    // toward transcribing (the recognizer returns empty text for genuine silence) when aggressive
+    // handling is enabled, instead of throwing the dictation away.
+    if peakLevel < 0.006 {
+        return transcribeShortQuietClipsAggressively ? .transcribe : .discardNoSpeech
+    }
     return .transcribe
 }
 

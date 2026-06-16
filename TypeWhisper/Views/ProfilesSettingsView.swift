@@ -1,6 +1,7 @@
 import SwiftUI
 import TypeWhisperPluginSDK
 
+@MainActor
 struct ProfilesSettingsView: View {
     @ObservedObject private var viewModel = ProfilesViewModel.shared
     @ObservedObject private var dictationViewModel = DictationViewModel.shared
@@ -1326,6 +1327,7 @@ private struct RulePreviewCard: View {
     }
 }
 
+@MainActor
 private func card<Content: View>(
     title: String,
     description: String,
@@ -1361,6 +1363,7 @@ private func card<Content: View>(
     }
 }
 
+@MainActor
 private func infoChip(_ text: String, tint: Color) -> some View {
     Text(text)
         .font(.caption.weight(.semibold))
@@ -1369,6 +1372,7 @@ private func infoChip(_ text: String, tint: Color) -> some View {
         .background(tint.opacity(0.14), in: Capsule())
 }
 
+@MainActor
 private func elevatedPanel(cornerRadius: CGFloat) -> some View {
     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .fill(Color(nsColor: .controlBackgroundColor).opacity(0.98))
@@ -1380,6 +1384,7 @@ private func elevatedPanel(cornerRadius: CGFloat) -> some View {
         .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
 }
 
+@MainActor
 private func groupedListSurface(cornerRadius: CGFloat) -> some View {
     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .fill(Color.white.opacity(0.022))
@@ -1389,6 +1394,7 @@ private func groupedListSurface(cornerRadius: CGFloat) -> some View {
         }
 }
 
+@MainActor
 private func settingTile<Content: View>(
     title: String,
     icon: String,
@@ -1417,6 +1423,7 @@ private func settingTile<Content: View>(
     }
 }
 
+@MainActor
 private func settingRow<Content: View>(
     title: String,
     description: String,
