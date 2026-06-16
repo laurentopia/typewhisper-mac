@@ -22,7 +22,13 @@ enum AudioEngineRecoveryPolicy {
     // re-entering the startup path.
     static let configurationChangeQuiescence: TimeInterval = 1.0
     static let configurationChangeBurstWindow: TimeInterval = 5.0
-    static let configurationChangeBurstLimit = 4
+    // Tolerate transient configuration-change storms before giving up on the recording. Under CPU
+    // contention (or a flaky Bluetooth / aggregate audio device) the audio engine can emit several
+    // `AVAudioEngineConfigurationChange` notifications in quick succession; the old limit of 4
+    // tripped the circuit breaker and killed the dictation mid-sentence (tearing down the engine and
+    // dismissing the indicator). 8 restarts in a 5s window still catches a genuinely broken route
+    // while surviving a recoverable hiccup. Each restart is debounced (>=0.15s) so this can't busy-loop.
+    static let configurationChangeBurstLimit = 8
 
     /// Backoff schedule used by the asynchronous observer-based recovery path,
     /// which runs on a dedicated dispatch queue. Blocking sleeps here are

@@ -119,7 +119,7 @@ struct OverlayIndicatorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: isTop ? .top : .bottom)
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.3), value: textExpanded)
-        .animation(.easeInOut(duration: 0.2), value: presentation.state)
+        .animation(.easeInOut(duration: 0.06), value: presentation.state)
         .animation(.easeOut(duration: 0.08), value: presentation.audioLevel)
         .onChange(of: presentation.partialText) {
             expandTranscriptPreviewIfNeeded()

@@ -89,8 +89,8 @@ struct MinimalIndicatorView: View {
             .frame(width: currentWidth)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: isTop ? .top : .bottom)
             .preferredColorScheme(.dark)
-            .animation(.easeInOut(duration: 0.2), value: currentWidth)
-            .animation(.easeInOut(duration: 0.2), value: presentation.state)
+            .animation(.easeInOut(duration: 0.08), value: currentWidth)
+            .animation(.easeInOut(duration: 0.06), value: presentation.state)
             .animation(.easeInOut(duration: 1.0), value: dotPulse)
             .onChange(of: presentation.state) {
                 if presentation.state == .recording {

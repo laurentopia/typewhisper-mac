@@ -37,7 +37,9 @@ class NotchIndicatorPanel: NSPanel {
     /// Large enough to accommodate the expanded (open) state. SwiftUI clips the visible area.
     private static let panelWidth: CGFloat = 500
     private static let panelHeight: CGFloat = 500
-    private static let presentationAnimationDuration: Duration = .milliseconds(220)
+    // Snappy reveal/dismiss: the indicator must feel near-instant when the hotkey is pressed.
+    // Kept just above the dismiss animation (0.06s) so the fade-out finishes before orderOut.
+    private static let presentationAnimationDuration: Duration = .milliseconds(70)
 
     private let screenResolver: IndicatorScreenResolver
     private let notchGeometry = NotchGeometry()
@@ -167,7 +169,7 @@ class NotchIndicatorPanel: NSPanel {
 
         guard !wasVisible else {
             if !notchGeometry.isPresented {
-                withAnimation(.easeOut(duration: 0.22)) {
+                withAnimation(.easeOut(duration: 0.06)) {
                     notchGeometry.isPresented = true
                 }
             }
@@ -178,7 +180,7 @@ class NotchIndicatorPanel: NSPanel {
         showTask = Task { @MainActor [weak self] in
             await Task.yield()
             guard !Task.isCancelled, let self else { return }
-            withAnimation(.easeOut(duration: 0.22)) {
+            withAnimation(.easeOut(duration: 0.06)) {
                 self.notchGeometry.isPresented = true
             }
             self.showTask = nil
@@ -219,7 +221,7 @@ class NotchIndicatorPanel: NSPanel {
             return
         }
 
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(.easeInOut(duration: 0.06)) {
             notchGeometry.isPresented = false
         }
 

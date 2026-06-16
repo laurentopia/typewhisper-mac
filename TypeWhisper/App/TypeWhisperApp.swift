@@ -467,6 +467,7 @@ final class ManagedAppWindowOpener {
 final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var indicatorCoordinator: IndicatorCoordinator?
     private var translationHostWindow: NSWindow?
+    private var memoryPressureService: MemoryPressureService?
     private var menuBarIconObserver: NSKeyValueObservation?
     private var dockIconBehaviorObserver: NSKeyValueObservation?
     private var appActivationObserver: NSObjectProtocol?
@@ -518,6 +519,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let coordinator = IndicatorCoordinator()
         coordinator.startObserving()
         indicatorCoordinator = coordinator
+
+        // Shed resident local ASR models when the system runs low on memory. Non-selected engines
+        // are always safe to release; the active engine is only released on a critical signal while
+        // idle, so we never tear down a model mid-dictation. Released models reload on next use.
+        let memoryPressure = MemoryPressureService { level in
+            Task { @MainActor in
+                let isBusy = DictationViewModel.shared.isRecording
+                    || AudioRecorderViewModel.shared.isTranscribing
+                ServiceContainer.shared.modelManagerService.unloadLocalModelsForMemoryPressure(
+                    includingSelected: level == .critical && !isBusy
+                )
+            }
+        }
+        memoryPressure.start()
+        memoryPressureService = memoryPressure
 
         #if canImport(Translation)
         if #available(macOS 15, *), let ts = ServiceContainer.shared.translationService as? TranslationService {

@@ -70,8 +70,20 @@ final class ModelManagerService: ObservableObject {
     private let providerKey = UserDefaultsKeys.selectedEngine
     private let modelKey = UserDefaultsKeys.selectedModelId
 
+    /// Idle timeout (seconds) used for local models when the user has never made an explicit
+    /// choice. Local engines hold a 0.6–2 GB model resident; leaving them loaded forever (the old
+    /// implicit "Never" default) is the dominant cause of high steady-state RAM for a menu-bar app
+    /// that is idle most of the day. The model transparently reloads on the next dictation.
+    static let defaultAutoUnloadSeconds = 300
+
     init() {
-        self.autoUnloadSeconds = UserDefaults.standard.integer(forKey: UserDefaultsKeys.modelAutoUnloadSeconds)
+        // Distinguish "user explicitly chose Never (0)" from "never configured" so we only apply
+        // the idle-unload default on first run; an explicit choice (including 0) is preserved.
+        if UserDefaults.standard.object(forKey: UserDefaultsKeys.modelAutoUnloadSeconds) == nil {
+            self.autoUnloadSeconds = Self.defaultAutoUnloadSeconds
+        } else {
+            self.autoUnloadSeconds = UserDefaults.standard.integer(forKey: UserDefaultsKeys.modelAutoUnloadSeconds)
+        }
         self.selectedProviderId = UserDefaults.standard.string(forKey: providerKey)
     }
 
@@ -731,6 +743,30 @@ final class ModelManagerService: ObservableObject {
         let sel = NSSelectorFromString("triggerAutoUnload")
         guard nsPlugin.responds(to: sel) else { return }
         nsPlugin.perform(sel)
+    }
+
+    // MARK: - Memory Pressure
+
+    /// Release resident local transcription models so the OS can reclaim RAM under memory pressure.
+    ///
+    /// Non-selected engines are always safe to release — only the selected engine ever transcribes —
+    /// so they are unloaded unconditionally. The selected engine is unloaded only when
+    /// `includingSelected` is true; the caller must guarantee no recording/transcription is in
+    /// flight, since tearing down a model mid-call can crash (the MLX cleanup path is the reason the
+    /// idle-unload timer also delays release). Cloud engines do not respond to `triggerAutoUnload`
+    /// and are skipped automatically. Released models reload on next use.
+    func unloadLocalModelsForMemoryPressure(includingSelected: Bool) {
+        let unloadSelector = NSSelectorFromString("triggerAutoUnload")
+        for engine in PluginManager.shared.transcriptionEngines {
+            if engine.providerId == selectedProviderId, !includingSelected { continue }
+            guard let nsPlugin = engine as? NSObject, nsPlugin.responds(to: unloadSelector) else { continue }
+            // Cancel any pending idle-unload timer so we don't double-fire on the same plugin.
+            let key = ObjectIdentifier(nsPlugin)
+            autoUnloadTasks[key]?.cancel()
+            autoUnloadTasks[key] = nil
+            autoUnloadTargets[key] = nil
+            nsPlugin.perform(unloadSelector)
+        }
     }
 
     private func runtimeLanguageSelection(

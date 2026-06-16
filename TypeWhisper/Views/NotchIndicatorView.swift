@@ -147,10 +147,10 @@ struct NotchIndicatorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .opacity(presentationOpacity)
         .preferredColorScheme(.dark)
-        .animation(.easeOut(duration: 0.22), value: geometry.isPresented)
-        .animation(.easeOut(duration: 0.24), value: currentWidth)
-        .animation(.easeOut(duration: 0.24), value: expandedBodyHeight)
-        .animation(.easeInOut(duration: 0.18), value: presentation.state)
+        .animation(.easeOut(duration: 0.06), value: geometry.isPresented)
+        .animation(.easeOut(duration: 0.08), value: currentWidth)
+        .animation(.easeOut(duration: 0.08), value: expandedBodyHeight)
+        .animation(.easeInOut(duration: 0.06), value: presentation.state)
         .animation(.easeOut(duration: 0.08), value: presentation.audioLevel)
         .onChange(of: presentation.partialText) {
             if showTranscriptPreview, !presentation.partialText.isEmpty, !textExpanded {
