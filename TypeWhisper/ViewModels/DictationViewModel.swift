@@ -255,6 +255,8 @@ final class DictationViewModel: ObservableObject {
     private var firstRecordingAudioBufferSeen = false
     private var pendingRecordingStartedPayload: RecordingStartedPayload?
     private var shouldPlayRecordingStartSoundWhenReady = false
+    private var recordingStartSoundWasPlayed = false
+    private var recordingStartSoundEndTime: Date?
     private var pendingRecordingAudioDuckingLevel: Float?
     private var pendingRecordingAudioDuckingTask: Task<Void, Never>?
     private var dictationSessions: [UUID: DictationSessionSnapshot] = [:]
@@ -627,6 +629,8 @@ final class DictationViewModel: ObservableObject {
         firstRecordingAudioBufferSeen = false
         pendingRecordingStartedPayload = nil
         shouldPlayRecordingStartSoundWhenReady = playsSound
+        recordingStartSoundWasPlayed = false
+        recordingStartSoundEndTime = nil
     }
 
     private func updateRecordingStartCuePayload(activeApp: (name: String?, bundleId: String?, url: String?)?) {
@@ -653,11 +657,12 @@ final class DictationViewModel: ObservableObject {
         recordingStartCuePending = false
         isRecordingInputReady = true
         if shouldPlayRecordingStartSoundWhenReady {
-            let startSoundDuration = soundService.playbackDuration(for: .recordingStarted, enabled: soundFeedbackEnabled)
-            if !soundService.play(.recordingStarted, enabled: soundFeedbackEnabled) {
-                applyPendingRecordingAudioDuckingIfNeeded()
+            if recordingStartSoundWasPlayed {
+                applyPendingRecordingAudioDuckingIfNeeded(after: remainingRecordingStartSoundDuration())
+            } else if playRecordingStartSoundIfNeeded() {
+                applyPendingRecordingAudioDuckingIfNeeded(after: remainingRecordingStartSoundDuration())
             } else {
-                applyPendingRecordingAudioDuckingIfNeeded(after: startSoundDuration)
+                applyPendingRecordingAudioDuckingIfNeeded()
             }
         } else {
             applyPendingRecordingAudioDuckingIfNeeded()
@@ -692,9 +697,38 @@ final class DictationViewModel: ObservableObject {
         firstRecordingAudioBufferSeen = false
         pendingRecordingStartedPayload = nil
         shouldPlayRecordingStartSoundWhenReady = false
+        recordingStartSoundWasPlayed = false
+        recordingStartSoundEndTime = nil
         pendingRecordingAudioDuckingLevel = nil
         pendingRecordingAudioDuckingTask?.cancel()
         pendingRecordingAudioDuckingTask = nil
+    }
+
+    @discardableResult
+    private func playRecordingStartSoundIfNeeded() -> Bool {
+        guard shouldPlayRecordingStartSoundWhenReady,
+              !recordingStartSoundWasPlayed else {
+            return recordingStartSoundWasPlayed
+        }
+
+        let startSoundDuration = soundService.playbackDuration(for: .recordingStarted, enabled: soundFeedbackEnabled)
+        guard soundService.play(.recordingStarted, enabled: soundFeedbackEnabled) else {
+            recordingStartSoundEndTime = nil
+            return false
+        }
+
+        recordingStartSoundWasPlayed = true
+        if let startSoundDuration {
+            recordingStartSoundEndTime = Date().addingTimeInterval(startSoundDuration)
+        } else {
+            recordingStartSoundEndTime = nil
+        }
+        return true
+    }
+
+    private func remainingRecordingStartSoundDuration() -> TimeInterval? {
+        guard let recordingStartSoundEndTime else { return nil }
+        return max(0, recordingStartSoundEndTime.timeIntervalSinceNow)
     }
 
     private func clearDeferredRecordingContext() {
@@ -923,6 +957,7 @@ final class DictationViewModel: ObservableObject {
             let selectedInputUsesBluetooth = audioDeviceService.selectedDeviceUsesBluetoothTransport
             audioRecordingService.selectedInputDeviceUsesBluetoothTransport = selectedInputUsesBluetooth
             prepareRecordingStartCue(playsSound: !selectedInputUsesBluetooth)
+            playRecordingStartSoundIfNeeded()
             let audioStartTimestamp = DispatchTime.now().uptimeNanoseconds
             try audioRecordingService.startRecording(requestUptimeNanoseconds: requestUptimeNanoseconds)
             let audioStartCompletedTimestamp = DispatchTime.now().uptimeNanoseconds

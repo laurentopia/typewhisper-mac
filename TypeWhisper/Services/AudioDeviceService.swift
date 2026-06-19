@@ -96,6 +96,7 @@ struct AudioInputDevice: Identifiable, Equatable, Sendable {
     let deviceID: AudioDeviceID
     let name: String
     let uid: String
+    var transportType: UInt32?
     var compatibility: AudioInputDeviceCompatibility = .unknown
 
     var id: String { uid }
@@ -253,14 +254,22 @@ final class AudioDeviceService: ObservableObject, @unchecked Sendable {
         if let audioDeviceIDResolverOverride {
             return audioDeviceIDResolverOverride(uid)
         }
+        if let selectedDevice {
+            return selectedDevice.deviceID
+        }
         return Self.audioDeviceID(fromUID: uid)
     }
 
     var selectedDeviceUsesBluetoothTransport: Bool {
-        guard let selectedDeviceID,
-              let transportType = transportType(for: selectedDeviceID) else {
+        guard let selectedDeviceID else {
             return false
         }
+        if let selectedDevice,
+           selectedDevice.deviceID == selectedDeviceID,
+           let transportType = selectedDevice.transportType {
+            return Self.isBluetoothTransportType(transportType)
+        }
+        guard let transportType = transportType(for: selectedDeviceID) else { return false }
         return Self.isBluetoothTransportType(transportType)
     }
 
@@ -1058,7 +1067,7 @@ final class AudioDeviceService: ObservableObject, @unchecked Sendable {
               let uid = snapshot.uid else {
             return nil
         }
-        return AudioInputDevice(deviceID: snapshot.deviceID, name: name, uid: uid)
+        return AudioInputDevice(deviceID: snapshot.deviceID, name: name, uid: uid, transportType: snapshot.transportType)
     }
 
     private static func inputDeviceExclusionReason(

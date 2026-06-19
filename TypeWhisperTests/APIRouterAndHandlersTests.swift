@@ -3660,7 +3660,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
 
         let sessionID = context.dictationViewModel.apiStartRecording()
 
-        XCTAssertEqual(events, ["start_audio"])
+        XCTAssertEqual(events, ["start_sound", "start_audio"])
         XCTAssertFalse(context.dictationViewModel.isRecordingInputReady)
         XCTAssertEqual(context.dictationViewModel.state, .inserting)
         XCTAssertEqual(context.dictationViewModel.actionFeedbackMessage, "Audio start failed")
@@ -3669,7 +3669,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
     }
 
     @MainActor
-    func testApiStartRecording_defersStartSoundUntilInputIsReady() async throws {
+    func testApiStartRecording_playsStartSoundBeforeAudioStartAndDefersReadinessUntilInputIsReady() async throws {
         let appSupportDirectory = try TestSupport.makeTemporaryDirectory()
         let originalSelectedInputDeviceUID = UserDefaults.standard.object(forKey: UserDefaultsKeys.selectedInputDeviceUID)
         UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.selectedInputDeviceUID)
@@ -3699,12 +3699,12 @@ final class APIRouterAndHandlersTests: XCTestCase {
 
         _ = context.dictationViewModel.apiStartRecording()
 
-        XCTAssertEqual(events, ["start_audio"])
+        XCTAssertEqual(events, ["start_sound", "start_audio"])
         XCTAssertFalse(context.dictationViewModel.isRecordingInputReady)
 
         context.audioRecordingService.testingNotifyFirstRecordingAudioBuffer()
 
-        XCTAssertEqual(events, ["start_audio", "start_sound"])
+        XCTAssertEqual(events, ["start_sound", "start_audio"])
         XCTAssertTrue(context.dictationViewModel.isRecordingInputReady)
     }
 
@@ -3749,12 +3749,12 @@ final class APIRouterAndHandlersTests: XCTestCase {
 
         _ = context.dictationViewModel.apiStartRecording()
 
-        XCTAssertEqual(events, ["start_audio"])
+        XCTAssertEqual(events, ["start_sound", "start_audio"])
         XCTAssertFalse(context.dictationViewModel.isRecordingInputReady)
 
         context.audioRecordingService.testingNotifyFirstRecordingAudioBuffer()
 
-        XCTAssertEqual(events, ["start_audio", "start_sound", "duck_audio_0.2"])
+        XCTAssertEqual(events, ["start_sound", "start_audio", "duck_audio_0.2"])
         XCTAssertTrue(context.dictationViewModel.isRecordingInputReady)
     }
 
@@ -3807,11 +3807,11 @@ final class APIRouterAndHandlersTests: XCTestCase {
         _ = context.dictationViewModel.apiStartRecording()
         context.audioRecordingService.testingNotifyFirstRecordingAudioBuffer()
 
-        XCTAssertEqual(events, ["start_audio", "start_sound"])
+        XCTAssertEqual(events, ["start_sound", "start_audio"])
 
         await fulfillment(of: [duckingApplied], timeout: 1.0)
 
-        XCTAssertEqual(events, ["start_audio", "start_sound", "duck_audio_0.2"])
+        XCTAssertEqual(events, ["start_sound", "start_audio", "duck_audio_0.2"])
     }
 
     @MainActor
@@ -4046,12 +4046,12 @@ final class APIRouterAndHandlersTests: XCTestCase {
 
         _ = context.dictationViewModel.apiStartRecording()
 
-        XCTAssertEqual(events, ["start_audio"])
+        XCTAssertEqual(events, ["start_sound", "start_audio"])
         XCTAssertFalse(context.dictationViewModel.isRecordingInputReady)
 
         context.audioRecordingService.testingNotifyFirstRecordingAudioBuffer()
 
-        XCTAssertEqual(events, ["start_audio", "start_sound"])
+        XCTAssertEqual(events, ["start_sound", "start_audio"])
         XCTAssertTrue(context.dictationViewModel.isRecordingInputReady)
     }
 

@@ -7,6 +7,7 @@ import Combine
 private final class MenuBarState: ObservableObject {
     @Published var statusText: String
     @Published var statusImage: String
+    @Published var activeModelText: String
     @Published var isModelReady: Bool
     @Published var hasRecentTranscriptions: Bool
     @Published var canCopyLastTranscription: Bool
@@ -41,6 +42,7 @@ private final class MenuBarState: ObservableObject {
         let modelStatus = Self.idleModelStatus(from: modelManager)
         self.statusText = modelStatus.text
         self.statusImage = modelStatus.image
+        self.activeModelText = Self.activeModelText(from: modelManager)
 
         // React to dictation state changes (not audioLevel/duration/partialText)
         dictation.$state
@@ -62,6 +64,7 @@ private final class MenuBarState: ObservableObject {
                 if case .idle = dictation.state {
                     self.update(state: .idle)
                 }
+                self.activeModelText = Self.activeModelText(from: modelManager)
             }
             .store(in: &cancellables)
 
@@ -124,6 +127,7 @@ private final class MenuBarState: ObservableObject {
             statusImage = modelStatus.image
         }
         isModelReady = modelManager.isModelReady
+        activeModelText = Self.activeModelText(from: modelManager)
     }
 
     private static func idleModelStatus(from modelManager: ModelManagerService) -> (text: String, image: String) {
@@ -136,6 +140,10 @@ private final class MenuBarState: ObservableObject {
         }
 
         return (String(localized: "\(name) selected"), "clock.fill")
+    }
+
+    private static func activeModelText(from modelManager: ModelManagerService) -> String {
+        modelManager.activeModelName ?? String(localized: "No model")
     }
 
     private func refreshCopyAvailability() {
@@ -230,6 +238,8 @@ struct MenuBarView: View {
         Group {
             let _ = { ManagedAppWindowOpener.shared.openWindow = openWindow }()
 
+            menuHeader
+
             Label(status.statusText, systemImage: status.statusImage)
 
             Divider()
@@ -253,6 +263,33 @@ struct MenuBarView: View {
             guard let id = notification.userInfo?["id"] as? String else { return }
             openWindow(id: id)
         }
+    }
+
+    private var menuHeader: some View {
+        HStack(spacing: 12) {
+            Text(versionDisplayText)
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 8)
+
+            Text(status.activeModelText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(status.isModelReady ? .primary : .secondary)
+        }
+        .font(.caption)
+        .frame(width: 280, alignment: .leading)
+    }
+
+    private var versionDisplayText: String {
+        var text = "v\(AppConstants.appVersion)"
+        if AppConstants.buildVersion != "0", AppConstants.buildVersion != AppConstants.appVersion {
+            text += " (\(AppConstants.buildVersion))"
+        }
+        if let channel = AppConstants.releaseChannel.versionDisplayName {
+            text += " \(channel)"
+        }
+        return text
     }
 
     private func openManagedWindow(_ id: String) {
