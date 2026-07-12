@@ -6933,9 +6933,13 @@
 				minimumVersion = 2.0.0;
 			};
 		};
-		RR00000000000000000006 /* XCLocalSwiftPackageReference "mlx-audio-swift" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = "/Volumes/XcodeVol/mlx-audio-swift";
+		RR00000000000000000006 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Blaizzy/mlx-audio-swift.git";
+			requirement = {
+				kind = revision;
+				revision = 2685c640d4079641a01ef3489cacb684c34109fd;
+			};
 		};
 		RR00000000000000000007 /* XCRemoteSwiftPackageReference "mediaremote-adapter" */ = {
 			isa = XCRemoteSwiftPackageReference;
