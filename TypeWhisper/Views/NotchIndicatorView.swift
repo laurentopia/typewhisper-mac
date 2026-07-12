@@ -16,6 +16,7 @@ struct NotchIndicatorView: View {
     private let sizing: IndicatorSizing = .notch
     private let processingBodyHeight: CGFloat = 28
     private let feedbackBodyHeight: CGFloat = 52
+    private let errorFeedbackBodyHeight: CGFloat = 72
 
     private var presentation: IndicatorPresentationData {
         IndicatorPresentationData.make(dictation: viewModel, recorder: recorder)
@@ -119,7 +120,7 @@ struct NotchIndicatorView: View {
             return processingBodyHeight
         }
         if hasActionFeedback {
-            return feedbackBodyHeight
+            return presentation.actionFeedbackIsError ? errorFeedbackBodyHeight : feedbackBodyHeight
         }
         return 0
     }

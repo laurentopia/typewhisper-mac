@@ -52,6 +52,29 @@ final class ParakeetPluginTests: XCTestCase {
         XCTAssertEqual(host.userDefault(forKey: "loadedModel") as? String, "parakeet-tdt-0.6b-v2")
     }
 
+    func testModelCatalogIncludesUnifiedEnglish() {
+        let plugin = makePlugin()
+
+        XCTAssertEqual(
+            plugin.transcriptionModels.map(\.id),
+            ["parakeet-tdt-0.6b-v2", "parakeet-tdt-0.6b-v3", "parakeet-unified-en-0.6b"]
+        )
+    }
+
+    func testActivationRestoresUnifiedEnglishSelectionWithoutLoading() throws {
+        let host = try PluginTestHostServices(defaults: [
+            "selectedModel": "parakeet-unified-en-0.6b",
+            "loadedModel": "parakeet-unified-en-0.6b",
+        ])
+        let plugin = makePlugin()
+
+        plugin.activate(host: host)
+
+        XCTAssertEqual(plugin.selectedModelId, "parakeet-unified-en-0.6b")
+        XCTAssertEqual(plugin.supportedLanguages, ["en"])
+        XCTAssertFalse(plugin.isConfigured)
+    }
+
     func testActivationDoesNotMarkPluginConfiguredBeforeRestoreSucceeds() throws {
         let host = try PluginTestHostServices(defaults: [
             "selectedModel": "parakeet-tdt-0.6b-v3",
@@ -152,6 +175,18 @@ final class ParakeetPluginTests: XCTestCase {
         let enabledPlugin = makePlugin()
         enabledPlugin.activate(host: enabledHost)
         XCTAssertEqual(enabledPlugin.dictionaryTermsSupport, .supported)
+    }
+
+    func testUnifiedEnglishDoesNotAdvertiseUnsupportedVocabularyBoosting() throws {
+        let host = try PluginTestHostServices(defaults: [
+            "selectedModel": "parakeet-unified-en-0.6b",
+            "vocabularyBoostingEnabled": true,
+        ])
+        let plugin = makePlugin()
+
+        plugin.activate(host: host)
+
+        XCTAssertEqual(plugin.dictionaryTermsSupport, .unsupported)
     }
 
     func testSettingsDismissalRequiresOnlyBaseModelReadiness() throws {

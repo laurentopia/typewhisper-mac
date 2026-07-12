@@ -178,17 +178,12 @@ final class HotkeyService: ObservableObject {
     var onWorkflowDictationStart: ((UUID, UInt64) -> Void)?
     var onWorkflowTextProcessing: ((UUID) -> Void)?
     var onCancelPressed: (() -> Void)?
-    var onPushToTalkInterruption: (() -> Void)?
-    var discardPushToTalkRecordingOnExtraKeyPress = false
-
     private var keyDownTime: Date?
     private var isActive = false
     private var activeSlotType: HotkeySlotType?
     private var activeGlobalHotkey: UnifiedHotkey?
     private(set) var activeProfileId: UUID?
     private(set) var activeWorkflowId: UUID?
-    private var pushToTalkInterruptionSignaled = false
-
     private static let toggleThreshold: TimeInterval = 1.0
     private static let doubleTapThreshold: TimeInterval = 0.4
     private static let monitorDedupWindow: TimeInterval = 0.12
@@ -287,6 +282,14 @@ final class HotkeyService: ObservableObject {
     private var runLoopSource: CFRunLoopSource?
     private var recentEventTapDispatches: [HotkeyDispatchKey: Date] = [:]
     private var capsLockOriginSuppressionUntil: Date?
+    @Published private(set) var isAccessibilityTrustedForGlobalHotkeys = false
+    private var monitorAccessibilityTrust: Bool?
+    private var accessibilityTrustProbeGeneration = 0
+    private var isAccessibilityTrustProbeActive = false
+    private var isMonitoringSuspended = false
+    private var physicalKeyStateProvider: (UInt16) -> Bool = { keyCode in
+        CGEventSource.keyState(.hidSystemState, key: CGKeyCode(keyCode))
+    }
 
     var accessibilityTrustedProvider: () -> Bool = { AXIsProcessTrusted() }
 
@@ -378,7 +381,6 @@ final class HotkeyService: ObservableObject {
         activeWorkflowId = nil
         currentMode = nil
         keyDownTime = nil
-        pushToTalkInterruptionSignaled = false
     }
 
     // MARK: - Profile Hotkeys
@@ -481,10 +483,21 @@ final class HotkeyService: ObservableObject {
     // MARK: - Event Monitor
 
     private func setupMonitor() {
+        guard !isMonitoringSuspended else { return }
+
         tearDownMonitor()
         let includeMouse = needsMouseEventMonitoring
+        let isTrusted = accessibilityTrustedProvider()
+        isAccessibilityTrustedForGlobalHotkeys = isTrusted
+        monitorAccessibilityTrust = isTrusted
 
-        guard accessibilityTrustedProvider() else {
+        if isTrusted {
+            stopAccessibilityTrustProbe()
+        } else {
+            startAccessibilityTrustProbe()
+        }
+
+        guard isTrusted else {
             logger.info("Accessibility permission not granted, installing local hotkey monitor only")
             installLocalEventMonitor(includeMouse: includeMouse)
             return
@@ -576,11 +589,69 @@ final class HotkeyService: ObservableObject {
     }
 
     func suspendMonitoring() {
+        isMonitoringSuspended = true
+        stopAccessibilityTrustProbe()
         tearDownMonitor()
     }
 
     func resumeMonitoring() {
+        isMonitoringSuspended = false
         setupMonitor()
+    }
+
+    func refreshMonitorForCurrentAccessibilityTrust() {
+        guard !isMonitoringSuspended else { return }
+
+        let isTrusted = accessibilityTrustedProvider()
+        isAccessibilityTrustedForGlobalHotkeys = isTrusted
+
+        guard isTrusted != monitorAccessibilityTrust else {
+            if isTrusted {
+                stopAccessibilityTrustProbe()
+            } else {
+                startAccessibilityTrustProbe()
+            }
+            return
+        }
+
+        logger.info("Accessibility permission changed; rebuilding hotkey monitor")
+        setupMonitor()
+    }
+
+    private func startAccessibilityTrustProbe() {
+        guard !isAccessibilityTrustProbeActive else { return }
+        isAccessibilityTrustProbeActive = true
+        accessibilityTrustProbeGeneration += 1
+        probeAccessibilityTrust(generation: accessibilityTrustProbeGeneration, remainingAttempts: 30)
+    }
+
+    private func stopAccessibilityTrustProbe() {
+        guard isAccessibilityTrustProbeActive else { return }
+        isAccessibilityTrustProbeActive = false
+        accessibilityTrustProbeGeneration += 1
+    }
+
+    private func probeAccessibilityTrust(generation: Int, remainingAttempts: Int) {
+        guard remainingAttempts > 0 else {
+            isAccessibilityTrustProbeActive = false
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self,
+                  self.isAccessibilityTrustProbeActive,
+                  self.accessibilityTrustProbeGeneration == generation else {
+                return
+            }
+
+            self.refreshMonitorForCurrentAccessibilityTrust()
+
+            if self.isAccessibilityTrustedForGlobalHotkeys {
+                self.stopAccessibilityTrustProbe()
+            } else {
+                self.probeAccessibilityTrust(generation: generation, remainingAttempts: remainingAttempts - 1)
+            }
+        }
     }
 
     // MARK: - CGEventTap (suppresses hotkey events)
@@ -683,7 +754,6 @@ final class HotkeyService: ObservableObject {
             return false
         }
 
-        signalPushToTalkInterruptionIfNeeded(for: event)
         updateCapsLockOriginTracker(for: event)
         var shouldSuppress = false
 
@@ -923,34 +993,6 @@ final class HotkeyService: ObservableObject {
         }
     }
 
-    private func signalPushToTalkInterruptionIfNeeded(for event: NSEvent) {
-        guard discardPushToTalkRecordingOnExtraKeyPress,
-              !pushToTalkInterruptionSignaled,
-              isActive,
-              activeSlotType == .pushToTalk,
-              activeProfileId == nil,
-              activeWorkflowId == nil,
-              event.type == .keyDown,
-              let hotkey = activeGlobalHotkey,
-              isExtraKeyDuringActivePushToTalk(event, hotkey: hotkey) else {
-            return
-        }
-
-        pushToTalkInterruptionSignaled = true
-        onPushToTalkInterruption?()
-    }
-
-    private func isExtraKeyDuringActivePushToTalk(_ event: NSEvent, hotkey: UnifiedHotkey) -> Bool {
-        switch hotkey.kind {
-        case .modifierCombo, .modifierOnly, .fn:
-            return true
-        case .keyWithModifiers, .bareKey:
-            return event.keyCode != hotkey.keyCode
-        case .mouseButton:
-            return false
-        }
-    }
-
     private func shouldDispatch(
         target: HotkeyDispatchKey.Target,
         phase: HotkeyDispatchPhase,
@@ -992,6 +1034,10 @@ final class HotkeyService: ObservableObject {
     @discardableResult
     func processEventForTesting(_ event: NSEvent, source: HotkeyEventSource) -> Bool {
         handleEvent(event, source: source)
+    }
+
+    func setPhysicalKeyStateProviderForTesting(_ provider: @escaping (UInt16) -> Bool) {
+        physicalKeyStateProvider = provider
     }
 
     func needsMouseEventMonitoringForTesting() -> Bool {
@@ -1133,6 +1179,11 @@ final class HotkeyService: ObservableObject {
             modifierWasDown: state.modifierWasDown,
             keyWasDown: state.keyWasDown
         )
+
+        if shouldIgnoreReleaseBecauseHotkeyIsStillPhysicallyHeld(result: result, hotkey: hotkey) {
+            logger.debug("Ignoring hotkey release while physical keys remain down: \(Self.displayName(for: hotkey), privacy: .public)")
+            return (false, false, true)
+        }
 
         let value: Bool?
         switch result {
@@ -1277,9 +1328,54 @@ final class HotkeyService: ObservableObject {
         return .none
     }
 
+    private func shouldIgnoreReleaseBecauseHotkeyIsStillPhysicallyHeld(
+        result: KeyEventResult,
+        hotkey: UnifiedHotkey
+    ) -> Bool {
+        guard result == .up || result == .modifierRelease else { return false }
+        return isHotkeyPhysicallyHeld(hotkey)
+    }
+
+    private func isHotkeyPhysicallyHeld(_ hotkey: UnifiedHotkey) -> Bool {
+        switch hotkey.kind {
+        case .mouseButton, .fn:
+            return false
+        case .bareKey:
+            return isPhysicalKeyDown(hotkey.keyCode)
+        case .modifierOnly:
+            return isPhysicalKeyDown(hotkey.keyCode)
+        case .modifierCombo:
+            return areRequiredModifiersPhysicallyDown(for: hotkey)
+        case .keyWithModifiers:
+            return isPhysicalKeyDown(hotkey.keyCode)
+                && areRequiredModifiersPhysicallyDown(for: hotkey)
+        }
+    }
+
+    private func areRequiredModifiersPhysicallyDown(for hotkey: UnifiedHotkey) -> Bool {
+        if !hotkey.modifierKeyCodes.isEmpty {
+            return hotkey.modifierKeyCodes.allSatisfy(isPhysicalKeyDown)
+        }
+
+        let flags = NSEvent.ModifierFlags(rawValue: hotkey.modifierFlags)
+        return Self.requiredModifierKeyCodeAlternatives(for: flags).allSatisfy { alternatives in
+            alternatives.contains { isPhysicalKeyDown($0) }
+        }
+    }
+
+    private func isPhysicalKeyDown(_ keyCode: UInt16) -> Bool {
+        physicalKeyStateProvider(keyCode)
+    }
+
+    private var isPushToTalkHoldActive: Bool {
+        isActive && currentMode == .pushToTalk
+    }
+
     // MARK: - Key Down / Up (Global Slots)
 
     private func handleKeyDown(slotType: HotkeySlotType, hotkey: UnifiedHotkey) {
+        guard !isPushToTalkHoldActive else { return }
+
         if slotType == .promptPalette {
             onPromptPaletteToggle?()
             return
@@ -1306,7 +1402,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         } else {
             let requestTimestamp = Self.requestTimestamp()
@@ -1316,7 +1411,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             keyDownTime = Date()
             isActive = true
-            pushToTalkInterruptionSignaled = false
             currentMode = slotType == .toggle ? .toggle : .pushToTalk
             onDictationStart?(requestTimestamp)
         }
@@ -1336,7 +1430,6 @@ final class HotkeyService: ObservableObject {
                 activeGlobalHotkey = nil
                 currentMode = nil
                 keyDownTime = nil
-                pushToTalkInterruptionSignaled = false
                 onDictationStop?()
             }
         case .pushToTalk:
@@ -1345,7 +1438,6 @@ final class HotkeyService: ObservableObject {
             activeGlobalHotkey = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         case .toggle:
             break
@@ -1363,6 +1455,8 @@ final class HotkeyService: ObservableObject {
     // MARK: - Key Down / Up (Profile Slots)
 
     private func handleProfileKeyDown(profileId: UUID) {
+        guard !isPushToTalkHoldActive else { return }
+
         if isActive {
             // Any hotkey stops active recording
             isActive = false
@@ -1372,7 +1466,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         } else {
             let requestTimestamp = Self.requestTimestamp()
@@ -1382,7 +1475,6 @@ final class HotkeyService: ObservableObject {
             activeGlobalHotkey = nil
             keyDownTime = Date()
             isActive = true
-            pushToTalkInterruptionSignaled = false
             currentMode = .pushToTalk // hybrid behavior
             onProfileDictationStart?(profileId, requestTimestamp)
         }
@@ -1403,7 +1495,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         }
     }
@@ -1411,6 +1502,8 @@ final class HotkeyService: ObservableObject {
     // MARK: - Key Down / Up (Workflow Slots)
 
     private func handleWorkflowKeyDown(workflowId: UUID, behavior: WorkflowHotkeyBehavior) {
+        guard !isPushToTalkHoldActive else { return }
+
         guard behavior == .startDictation else {
             onWorkflowTextProcessing?(workflowId)
             return
@@ -1424,7 +1517,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         } else {
             let requestTimestamp = Self.requestTimestamp()
@@ -1434,7 +1526,6 @@ final class HotkeyService: ObservableObject {
             activeGlobalHotkey = nil
             keyDownTime = Date()
             isActive = true
-            pushToTalkInterruptionSignaled = false
             currentMode = .pushToTalk
             onWorkflowDictationStart?(workflowId, requestTimestamp)
         }
@@ -1455,7 +1546,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         }
     }
@@ -1677,6 +1767,18 @@ final class HotkeyService: ObservableObject {
         case 0x3B, 0x3E: return .control
         default: return nil
         }
+    }
+
+    private nonisolated static func requiredModifierKeyCodeAlternatives(
+        for flags: NSEvent.ModifierFlags
+    ) -> [[UInt16]] {
+        var alternatives: [[UInt16]] = []
+        if flags.contains(.command) { alternatives.append([0x37, 0x36]) }
+        if flags.contains(.option) { alternatives.append([0x3A, 0x3D]) }
+        if flags.contains(.control) { alternatives.append([0x3B, 0x3E]) }
+        if flags.contains(.shift) { alternatives.append([0x38, 0x3C]) }
+        if flags.contains(.function) { alternatives.append([0x3F]) }
+        return alternatives
     }
 
     private nonisolated static let deviceModifierKeyMasks: [(mask: UInt, keyCode: UInt16)] = [

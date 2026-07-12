@@ -152,9 +152,10 @@ final class DictationSettingsHandler {
                 guard !Task.isCancelled else { return }
                 DispatchQueue.main.async { [weak self] in
                     self?.onObjectWillChange?()
+                    self?.hotkeyService.refreshMonitorForCurrentAccessibilityTrust()
                     if !hasResumedHotkeyMonitoring, !needsAccessibility() {
                         hasResumedHotkeyMonitoring = true
-                        self?.hotkeyService.resumeMonitoring()
+                        self?.hotkeyService.refreshMonitorForCurrentAccessibilityTrust()
                     }
                 }
                 if !needsMic(), !needsAccessibility() { return }

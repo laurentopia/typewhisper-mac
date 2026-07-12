@@ -16,6 +16,7 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
 
     fileprivate var host: HostServices?
     fileprivate var asrManager: AsrManager?
+    fileprivate var unifiedAsrManager: UnifiedAsrManager?
     fileprivate var loadedAsrModels: AsrModels?
     fileprivate var loadedModelId: String?
     fileprivate var _selectedModelId: String?
@@ -69,6 +70,7 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
     func deactivate() {
         clearVocabularyBoostingState(resetModelState: true)
         asrManager = nil
+        unifiedAsrManager = nil
         loadedAsrModels = nil
         loadedModelId = nil
         _selectedModelId = nil
@@ -83,7 +85,13 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
     var providerDisplayName: String { "Parakeet" }
 
     var isConfigured: Bool {
-        asrManager != nil && loadedModelId != nil
+        guard loadedModelId == selectedVersion.modelDef.id else { return false }
+        switch selectedVersion {
+        case .v2, .v3:
+            return asrManager != nil
+        case .unifiedEnglish:
+            return unifiedAsrManager != nil
+        }
     }
 
     var canDismissSettingsAfterSetup: Bool {
@@ -126,7 +134,8 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
 
     var supportsTranslation: Bool { false }
     var dictionaryTermsSupport: DictionaryTermsSupport {
-        vocabularyBoostingEnabled ? .supported : .requiresPluginSetting
+        guard selectedVersion != .unifiedEnglish else { return .unsupported }
+        return vocabularyBoostingEnabled ? .supported : .requiresPluginSetting
     }
 
     var supportedLanguages: [String] {
@@ -157,16 +166,8 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
         onProgress: @Sendable @escaping (String) -> Bool,
         onSourceProgress: @Sendable @escaping (PluginTranscriptionSourceProgress) -> Bool
     ) async throws -> PluginTranscriptionResult {
-        guard let asrManager else {
-            throw PluginTranscriptionError.notConfigured
-        }
-
         if translate {
             throw PluginTranscriptionError.apiError("Parakeet does not support translation")
-        }
-
-        if vocabularyBoostingEnabled {
-            await configureBoostingIfNeeded(prompt: prompt)
         }
 
         let normalizedSamples = PluginAudioUtils.paddedSamples(
@@ -174,6 +175,30 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
             minimumDuration: 1.0,
             sampleRate: 16_000
         )
+
+        if selectedVersion == .unifiedEnglish {
+            guard let unifiedAsrManager else {
+                throw PluginTranscriptionError.notConfigured
+            }
+            let text = try await unifiedAsrManager.transcribe(normalizedSamples)
+            let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            _ = onProgress(trimmedText)
+            _ = onSourceProgress(PluginTranscriptionSourceProgress(
+                processedDuration: audio.duration,
+                totalDuration: audio.duration,
+                previewText: trimmedText
+            ))
+            return PluginTranscriptionResult(text: text, detectedLanguage: "en")
+        }
+
+        guard let asrManager else {
+            throw PluginTranscriptionError.notConfigured
+        }
+
+        if vocabularyBoostingEnabled {
+            await configureBoostingIfNeeded(prompt: prompt)
+        }
+
         let fluidLanguage = Self.fluidAudioLanguage(for: language)
         var decoderState = TdtDecoderState.make(decoderLayers: await asrManager.decoderLayerCount)
         let progressTask = Task { [asrManager, duration = audio.duration, onSourceProgress] in
@@ -499,28 +524,34 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
     fileprivate func loadModel() async {
         modelState = .downloading
         downloadProgress = 0.1
+        let versionToLoad = selectedVersion
 
         do {
             applyHuggingFaceTokenToEnvironment()
-            let models = try await AsrModels.downloadAndLoad(version: selectedVersion.asrModelVersion)
-            downloadProgress = 0.7
-
-            let manager = AsrManager(config: .default)
-            try await manager.loadModels(models)
+            switch versionToLoad {
+            case .v2:
+                try await loadTdtModel(version: .v2)
+            case .v3:
+                try await loadTdtModel(version: .v3)
+            case .unifiedEnglish:
+                let manager = UnifiedAsrManager()
+                try await manager.loadModels()
+                unifiedAsrManager = manager
+                asrManager = nil
+                loadedAsrModels = nil
+            }
             downloadProgress = 1.0
 
-            asrManager = manager
-            loadedAsrModels = models
-            loadedModelId = selectedVersion.modelDef.id
-            _selectedModelId = selectedVersion.modelDef.id
+            loadedModelId = versionToLoad.modelDef.id
+            _selectedModelId = versionToLoad.modelDef.id
             modelState = .ready
 
-            host?.setUserDefault(selectedVersion.modelDef.id, forKey: "selectedModel")
-            host?.setUserDefault(selectedVersion.modelDef.id, forKey: "loadedModel")
-            host?.setUserDefault(selectedVersion.rawValue, forKey: "selectedVersion")
+            host?.setUserDefault(versionToLoad.modelDef.id, forKey: "selectedModel")
+            host?.setUserDefault(versionToLoad.modelDef.id, forKey: "loadedModel")
+            host?.setUserDefault(versionToLoad.rawValue, forKey: "selectedVersion")
             host?.notifyCapabilitiesChanged()
 
-            if vocabularyBoostingEnabled {
+            if vocabularyBoostingEnabled && versionToLoad != .unifiedEnglish {
                 let cacheDir = CtcModels.defaultCacheDirectory(for: .ctc110m)
                 if CtcModels.modelsExist(at: cacheDir) {
                     await downloadCtcModel()
@@ -532,12 +563,24 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
         }
     }
 
+    private func loadTdtModel(version: AsrModelVersion) async throws {
+        let models = try await AsrModels.downloadAndLoad(version: version)
+        downloadProgress = 0.7
+
+        let manager = AsrManager(config: .default)
+        try await manager.loadModels(models)
+        asrManager = manager
+        unifiedAsrManager = nil
+        loadedAsrModels = models
+    }
+
     @objc func triggerAutoUnload() { unloadModel(clearPersistence: false) }
     @objc func triggerRestoreModel() { Task { await restoreLoadedModel(allowDownloads: true) } }
 
     func unloadModel(clearPersistence: Bool = true) {
         clearVocabularyBoostingState(resetModelState: true)
         asrManager = nil
+        unifiedAsrManager = nil
         loadedAsrModels = nil
         loadedModelId = nil
         modelState = .notLoaded
@@ -565,8 +608,28 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
     }
 
     private func isModelDownloaded(version: ParakeetVersion) -> Bool {
-        let cacheDir = AsrModels.defaultCacheDirectory(for: version.asrModelVersion)
-        return AsrModels.modelsExist(at: cacheDir, version: version.asrModelVersion)
+        switch version {
+        case .v2:
+            let cacheDir = AsrModels.defaultCacheDirectory(for: .v2)
+            return AsrModels.modelsExist(at: cacheDir, version: .v2)
+        case .v3:
+            let cacheDir = AsrModels.defaultCacheDirectory(for: .v3)
+            return AsrModels.modelsExist(at: cacheDir, version: .v3)
+        case .unifiedEnglish:
+            guard let modelsBaseDirectory = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first else {
+                return false
+            }
+            let modelsDirectory = modelsBaseDirectory
+                .appendingPathComponent("FluidAudio", isDirectory: true)
+                .appendingPathComponent("Models", isDirectory: true)
+            let cacheDirectory = modelsDirectory.appendingPathComponent(Repo.parakeetUnified.folderName)
+            return ModelNames.ParakeetUnified.requiredModels(variant: "offline").allSatisfy { modelName in
+                FileManager.default.fileExists(atPath: cacheDirectory.appendingPathComponent(modelName).path)
+            }
+        }
     }
 
     // MARK: - Settings View
@@ -628,13 +691,7 @@ final class ParakeetPlugin: NSObject, SourceProgressTranscriptionEnginePlugin, D
 enum ParakeetVersion: String, CaseIterable {
     case v2
     case v3
-
-    var asrModelVersion: AsrModelVersion {
-        switch self {
-        case .v2: return .v2
-        case .v3: return .v3
-        }
-    }
+    case unifiedEnglish
 
     var modelDef: ParakeetModelDef {
         switch self {
@@ -652,6 +709,13 @@ enum ParakeetVersion: String, CaseIterable {
                 sizeDescription: "~600 MB",
                 ramRequirement: "8 GB+"
             )
+        case .unifiedEnglish:
+            return ParakeetModelDef(
+                id: "parakeet-unified-en-0.6b",
+                displayName: "Parakeet Unified EN",
+                sizeDescription: "~650 MB",
+                ramRequirement: "8 GB+"
+            )
         }
     }
 
@@ -661,6 +725,8 @@ enum ParakeetVersion: String, CaseIterable {
             return ["en"]
         case .v3:
             return ["bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk"]
+        case .unifiedEnglish:
+            return ["en"]
         }
     }
 
@@ -674,6 +740,8 @@ enum ParakeetVersion: String, CaseIterable {
             return String(localized: "NVIDIA Parakeet TDT V2 - extremely fast on Apple Silicon. English only, highest recall. No API key required.", bundle: bundle)
         case .v3:
             return String(localized: "NVIDIA Parakeet TDT - extremely fast on Apple Silicon. 25 European languages, no API key required.", bundle: bundle)
+        case .unifiedEnglish:
+            return String(localized: "Parakeet Unified - English only. Faster and more accurate than Parakeet v3 in the same CoreML benchmark, with punctuation and capitalization. No API key required.", bundle: bundle)
         }
     }
 
@@ -912,7 +980,7 @@ private struct ParakeetSettingsView: View {
                 }
                 .padding(.vertical, 4)
 
-                if case .ready = modelState {
+                if case .ready = modelState, selectedVersion != .unifiedEnglish {
                     Divider()
                     vocabularyBoostingSection
                 }

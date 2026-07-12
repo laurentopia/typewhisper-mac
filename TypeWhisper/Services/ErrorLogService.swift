@@ -669,13 +669,21 @@ final class ErrorLogService: ObservableObject {
     }
 
     private func loadEntries() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([ErrorLogEntry].self, from: data) else { return }
-        entries = decoded
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            let data = try Data(contentsOf: fileURL)
+            entries = try JSONDecoder().decode([ErrorLogEntry].self, from: data)
+        } catch {
+            logger.error("Failed to load error log: \(error.localizedDescription)")
+        }
     }
 
     private func saveEntries() {
-        guard let data = try? JSONEncoder().encode(entries) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        do {
+            let data = try JSONEncoder().encode(entries)
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            logger.error("Failed to save error log: \(error.localizedDescription)")
+        }
     }
 }

@@ -3,6 +3,38 @@ import AppKit
 @testable import TypeWhisper
 
 final class DictationViewModelIndicatorSettingsTests: XCTestCase {
+    func testDictationFailureCodesAreNumericAndAtMostTwoDigits() {
+        for code in DictationFailureCode.allCases {
+            XCTAssertNotNil(Int(code.rawValue))
+            XCTAssertLessThanOrEqual(code.rawValue.count, 2)
+        }
+    }
+
+    func testDictationFailureMessageStartsWithCodeOnOwnLineAndStaysReadable() {
+        XCTAssertEqual(
+            DictationFailureCode.noSpeechRecognized.displayMessage("No speech recognized"),
+            "08\nNo speech recognized"
+        )
+        XCTAssertGreaterThanOrEqual(DictationFailureCode.displayDuration, 8.0)
+    }
+
+    @MainActor
+    func testCodedDictationFailurePersistsInErrorLog() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TypeWhisperErrorLogTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let message = DictationFailureCode.noSpeechRecognized.displayMessage("No speech recognized")
+        ErrorLogService(appSupportDirectory: directory).addEntry(
+            message: message,
+            category: "transcription"
+        )
+
+        let reloadedService = ErrorLogService(appSupportDirectory: directory)
+        XCTAssertEqual(reloadedService.entries.first?.message, message)
+        XCTAssertEqual(reloadedService.entries.first?.category, "transcription")
+    }
+
     private var defaults: UserDefaults!
     private var suiteName: String!
 

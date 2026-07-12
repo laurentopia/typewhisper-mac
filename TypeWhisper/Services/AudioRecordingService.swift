@@ -180,6 +180,10 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
     private var startupConfigurationChangeGuard: StartupConfigurationChangeGuard?
     private var configChangeObserver: NSObjectProtocol?
     private var sampleBuffer: [Float] = []
+    // Rolling pre-roll of recent warm-idle audio, prepended on the next press so a quick
+    // press keeps the word onset spoken during the arm latency. Guarded by bufferLock.
+    private var preRollBuffer: [Float] = []
+    private static let preRollMaxSamples = Int(0.3 * targetSampleRate)
     private var _peakRawAudioLevel: Float = 0
     private let bufferLock = NSLock()
     private let microphoneBoostEnabledLock = OSAllocatedUnfairLock(initialState: false)
@@ -190,6 +194,19 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
     private let recoveryQueue = DispatchQueue(label: "com.typewhisper.audio-recovery", qos: .userInitiated)
     private let engineTeardownRetainer = DelayedReleaseRetainer<AVAudioEngine>(label: "com.typewhisper.audio-engine-teardown")
     private let recoveryCoordinator = AudioEngineRecoveryCoordinator()
+    // Warm-engine (non-Bluetooth avAudioEngine path): keep the engine running for a short
+    // window after a dictation so the next press captures from an already-live mic (no
+    // ~300ms warmup gap). Releases the mic (+ orange dot) after an idle period. Never takes
+    // exclusive/hog mode, so other apps can use the mic concurrently.
+    var warmEngineEnabled = true
+    private static let warmEngineHoldDuration: TimeInterval = 60
+    // Warm-engine state, guarded by warmLock (NSLock can hold the non-Sendable work item).
+    private let warmLock = NSLock()
+    private var warmRoute: AudioInputCaptureRoute?
+    private var warmReleaseWorkItem: DispatchWorkItem?
+    // Gate for whether render-thread audio is appended to the recording buffer. False while
+    // the engine is warm-but-idle (running, not recording) so idle audio is discarded.
+    private let shouldAccumulateLock = OSAllocatedUnfairLock(initialState: false)
     private let recoveryAudioStore: DictationRecoveryAudioStore
     private let outputVolumeGuard: AudioOutputVolumeGuard
     private let inputActivationGuard: AudioInputDeviceActivating
@@ -325,6 +342,19 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
 
         try validateRecordingInputAvailability()
         clearRecordingBuffer(requestUptimeNanoseconds: requestUptimeNanoseconds)
+        // Arm accumulation: render-thread buffers now flow into this recording. (Warm-idle
+        // sets this false so a running-but-not-recording engine discards its audio.)
+        shouldAccumulateLock.withLock { $0 = true }
+        // Cancel any pending warm-engine release; this recording owns the engine now.
+        cancelWarmRelease()
+        // Seed with the warm pre-roll so a quick press keeps the onset spoken during the arm
+        // latency (empty on a cold start — the engine wasn't capturing yet).
+        bufferLock.lock()
+        if !preRollBuffer.isEmpty {
+            sampleBuffer.insert(contentsOf: preRollBuffer, at: 0)
+            preRollBuffer.removeAll(keepingCapacity: true)
+        }
+        bufferLock.unlock()
         recoveryAudioStore.startNewRecording()
         publishRecoverableRecordingURLs(recoveryAudioStore.recoveryURLs)
 
@@ -377,6 +407,9 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
         }
 
         if case .inputOnlyDevice(let inputOnlyDeviceID) = selectedCaptureRoute {
+            // Tear down any stale warm engine (from a previous default-device dictation)
+            // before switching to this explicit input device.
+            releaseStaleWarmEngineForColdStart()
             do {
                 try startInputOnlyRecording(deviceID: inputOnlyDeviceID, label: "recording")
                 outputVolumeGuard.restoreIfRaised(reason: "recording-start")
@@ -390,6 +423,26 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
             return
         }
 
+        // WARM REUSE: a recent dictation left a non-Bluetooth engine running. If the route
+        // is unchanged and the engine is healthy, reuse it so capture starts instantly
+        // (skips the ~250ms engine bring-up). Coordinator/observer stay as-is (still running).
+        let selectedUsesBluetooth = configLock.withLock {
+            _hasExplicitDeviceSelection && _selectedInputDeviceUsesBluetoothTransport
+        }
+        let currentRoute = selectedCaptureRoute
+        if warmEngineEnabled, !selectedUsesBluetooth,
+           warmLock.withLock({ warmRoute }) == currentRoute,
+           let warmEngine = engineLock.withLock({ audioEngine }), warmEngine.isRunning {
+            cancelWarmRelease()
+            outputVolumeGuard.restoreIfRaised(reason: "recording-start-warm-reuse")
+            outputVolumeGuard.clear()
+            isRecording = true
+            return
+        }
+
+        // Cold start on the regular path: tear down any stale warm engine (e.g. switching
+        // to a Bluetooth default) before creating a fresh one, so it can't be orphaned.
+        releaseStaleWarmEngineForColdStart()
         let engine = AVAudioEngine()
         engineLock.withLock {
             audioEngine = engine
@@ -418,6 +471,8 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
             outputVolumeGuard.restoreIfRaised(reason: "recording-start")
             outputVolumeGuard.clear()
             isRecording = true
+            // Remember the route so the next press can reuse this engine while warm.
+            warmLock.withLock { warmRoute = (warmEngineEnabled && !selectedUsesBluetooth) ? currentRoute : nil }
         } catch {
             let failedEngine = engineLock.withLock { audioEngine } ?? engine
             cleanupAfterFailedStart(failedEngine)
@@ -450,6 +505,35 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
                 self?.isRecording = false
                 self?.audioLevel = normalizedLevel
                 self?.rawAudioLevel = rms
+            }
+            return samples
+        }
+
+        // WARM-KEEP: for the (non-Bluetooth) avAudioEngine path, don't tear the engine down
+        // on stop — keep it running for a short window so the next press is instant. Stop
+        // accumulating, drain, and schedule the idle release.
+        let warmKeepEngine: AVAudioEngine? = engineLock.withLock {
+            (warmEngineEnabled && inputCaptureSession == nil) ? audioEngine : nil
+        }
+        if let warmEngine = warmKeepEngine, warmEngine.isRunning, warmLock.withLock({ warmRoute }) != nil {
+            var graceApplied = false
+            if policy.shouldApplyGracePeriod(bufferedDuration: totalBufferDuration),
+               case .finalizeShortSpeech(_, let maxExtraCapture, let pollInterval) = policy {
+                let deadline = Date().addingTimeInterval(maxExtraCapture)
+                graceApplied = true
+                while Date() < deadline, policy.shouldApplyGracePeriod(bufferedDuration: totalBufferDuration) {
+                    try? await Task.sleep(for: .seconds(pollInterval))
+                }
+            }
+            setLastStopGraceCaptureApplied(graceApplied)
+            // Stop accumulating BEFORE flushing so any in-flight render-thread work discards.
+            shouldAccumulateLock.withLock { $0 = false }
+            processingQueue.sync { }
+            let samples = drainSampleBuffer()
+            scheduleWarmRelease()
+            DispatchQueue.main.async { [weak self] in
+                self?.isRecording = false
+                self?.audioLevel = 0
             }
             return samples
         }
@@ -543,6 +627,16 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
     /// Re-setup the audio engine after a system configuration change (e.g. notification sound).
     /// Preserves already-buffered samples so no audio is lost.
     private func handleConfigurationChangeNotification() {
+        // If a device/route change arrives while the engine is warm-but-idle, drop the warm
+        // engine so the next press cold-starts on the CURRENT default device (and so idle
+        // route events don't pile up toward the recovery circuit breaker). releaseWarmEngine
+        // no-ops if a recording armed in the meantime, so it can't tear down a live capture.
+        let warmIdle = !shouldAccumulateLock.withLock({ $0 }) && warmLock.withLock({ warmRoute }) != nil
+        if warmIdle {
+            cancelWarmRelease()
+            DispatchQueue.main.async { [weak self] in self?.releaseWarmEngine() }
+            return
+        }
         scheduleRecoveryIfNeeded(recoveryCoordinator.noteConfigurationChange())
     }
 
@@ -870,6 +964,70 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
         engine.stop()
     }
 
+    // MARK: - Warm engine
+
+    /// Schedule the warm (running-but-idle) engine to be released after the idle window.
+    private func scheduleWarmRelease() {
+        let item = DispatchWorkItem { [weak self] in self?.releaseWarmEngine() }
+        let previous: DispatchWorkItem? = warmLock.withLock {
+            let old = warmReleaseWorkItem
+            warmReleaseWorkItem = item
+            return old
+        }
+        previous?.cancel()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.warmEngineHoldDuration, execute: item)
+    }
+
+    /// Cancel a pending warm release (a new recording is starting).
+    private func cancelWarmRelease() {
+        let item: DispatchWorkItem? = warmLock.withLock {
+            let old = warmReleaseWorkItem
+            warmReleaseWorkItem = nil
+            return old
+        }
+        item?.cancel()
+    }
+
+    /// Tear down a warm engine after the idle window. Mirrors the stop path's teardown.
+    /// Runs on the main queue (scheduled via asyncAfter), so it never races startRecording
+    /// (also main). No-op if a recording armed accumulation while the timer was pending.
+    private func releaseWarmEngine() {
+        guard !shouldAccumulateLock.withLock({ $0 }) else { return }
+        warmLock.withLock { warmRoute = nil; warmReleaseWorkItem = nil }
+        bufferLock.withLock { preRollBuffer.removeAll(keepingCapacity: false) }
+        let engine: AVAudioEngine? = engineLock.withLock {
+            let engine = audioEngine
+            audioEngine = nil
+            startupConfigurationChangeGuard = nil
+            return engine
+        }
+        guard let engine else { return }
+        recoveryCoordinator.transitionToIdle()
+        removeConfigurationObserver()
+        teardownEngine(engine)
+        engineTeardownRetainer.retain(engine, for: Self.engineTeardownRetentionInterval)
+        inputActivationGuard.restore(reason: "warm-release")
+        DispatchQueue.main.async { [weak self] in self?.audioLevel = 0 }
+    }
+
+    /// Tear down a stale warm engine left over from a *different* route before a cold start,
+    /// so switching input devices mid-session can't orphan a running engine.
+    private func releaseStaleWarmEngineForColdStart() {
+        let engine: AVAudioEngine? = engineLock.withLock {
+            let engine = audioEngine
+            audioEngine = nil
+            startupConfigurationChangeGuard = nil
+            return engine
+        }
+        warmLock.withLock { warmRoute = nil }
+        bufferLock.withLock { preRollBuffer.removeAll(keepingCapacity: false) }
+        guard let engine else { return }
+        recoveryCoordinator.transitionToIdle()
+        removeConfigurationObserver()
+        teardownEngine(engine)
+        engineTeardownRetainer.retain(engine, for: Self.engineTeardownRetentionInterval)
+    }
+
     @discardableResult
     private func replaceAudioEngineForRecoveryIfNeeded(_ engine: AVAudioEngine) -> AVAudioEngine? {
         let replacementEngine = AVAudioEngine()
@@ -1051,6 +1209,17 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
     private func processConvertedSamples(_ samples: [Float]) {
         let boostResult = MicrophoneBoostProcessor.process(samples, enabled: microphoneBoostEnabled)
         let processedSamples = boostResult.samples
+
+        // Warm-but-idle (engine running, not recording): keep a short rolling pre-roll so a
+        // quick press captures the word onset spoken during the arm latency. No meter/cue.
+        guard shouldAccumulateLock.withLock({ $0 }) else {
+            bufferLock.lock()
+            preRollBuffer.append(contentsOf: processedSamples)
+            let overflow = preRollBuffer.count - Self.preRollMaxSamples
+            if overflow > 0 { preRollBuffer.removeFirst(overflow) }
+            bufferLock.unlock()
+            return
+        }
         let rms = boostResult.outputRMS
         let normalizedLevel = AudioLevelMeter.normalizedLevel(rms: rms)
         var requestToFirstBufferMs: Double?

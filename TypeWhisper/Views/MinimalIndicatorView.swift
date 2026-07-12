@@ -220,7 +220,8 @@ struct MinimalIndicatorView: View {
             Text(text)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.white.opacity(0.92))
-                .lineLimit(2)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

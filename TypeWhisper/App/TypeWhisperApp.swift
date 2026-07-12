@@ -69,7 +69,7 @@ private struct MenuBarExtraLabel: View {
     var body: some View {
         Image(nsImage: MenuBarLogoMarkImage.image(isRecordingActive: isRecordingActive))
             .resizable()
-            .renderingMode(isRecordingActive ? .original : .template)
+            .renderingMode(.original)
             .frame(width: 18, height: 18)
             .accessibilityLabel(Text(verbatim: title))
             .accessibilityValue(
@@ -108,7 +108,10 @@ enum MenuBarLogoMarkImage {
         image.lockFocus()
 
         NSGraphicsContext.current?.shouldAntialias = true
-        (isRecordingActive ? NSColor.systemRed : NSColor.black).setFill()
+        // Idle icon is a light blue (blue mixed into white) instead of the system
+        // template white. Recording stays red. Tweak `idleTint` to taste.
+        let idleTint = NSColor(srgbRed: 0.55, green: 0.78, blue: 1.0, alpha: 1.0)
+        (isRecordingActive ? NSColor.systemRed : idleTint).setFill()
 
         for rect in barRects(in: CGRect(origin: .zero, size: size)) {
             NSBezierPath(
@@ -119,7 +122,9 @@ enum MenuBarLogoMarkImage {
         }
 
         image.unlockFocus()
-        image.isTemplate = !isRecordingActive
+        // Non-template so the light-blue (idle) / red (recording) colors render
+        // as drawn instead of being recolored white/black by the menu bar.
+        image.isTemplate = false
         return image
     }
 
@@ -579,6 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             Task { @MainActor in
                 ActivationSourceTracker.shared.recordActivation(application)
+                ServiceContainer.shared.hotkeyService.refreshMonitorForCurrentAccessibilityTrust()
             }
         }
 
@@ -588,6 +594,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             queue: .main
         ) { _ in
             PluginHTTPClient.resetSharedSession(reason: "macOS wake")
+            Task { @MainActor in
+                ServiceContainer.shared.hotkeyService.refreshMonitorForCurrentAccessibilityTrust()
+            }
         }
 
         // Observe settings window lifecycle

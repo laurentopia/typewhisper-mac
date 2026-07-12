@@ -17,6 +17,7 @@ struct ErrorLogEntry: Codable, Identifiable {
         switch category {
         case "transcription": return "waveform"
         case "recording": return "mic"
+        case "insertion": return "keyboard"
         case "prompt": return "text.bubble"
         case "plugin": return "puzzlepiece"
         default: return "exclamationmark.triangle"
@@ -27,6 +28,7 @@ struct ErrorLogEntry: Codable, Identifiable {
         switch category {
         case "transcription": return String(localized: "Transcription")
         case "recording": return String(localized: "Recording")
+        case "insertion": return String(localized: "Text Insertion")
         case "prompt": return String(localized: "Prompt")
         case "plugin": return String(localized: "Plugin")
         default: return String(localized: "General")

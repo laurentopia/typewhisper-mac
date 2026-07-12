@@ -11,6 +11,7 @@ private final class MenuBarState: ObservableObject {
     @Published var isModelReady: Bool
     @Published var hasRecentTranscriptions: Bool
     @Published var canCopyLastTranscription: Bool
+    @Published var latestTranscriptionText: String?
     @Published var hasRecoverableRecording: Bool
     @Published var recorderState: AudioRecorderViewModel.RecorderState
     @Published var canToggleRecorder: Bool
@@ -30,9 +31,11 @@ private final class MenuBarState: ObservableObject {
 
         // Set initial values immediately
         self.isModelReady = modelManager.isModelReady
-        let hasRecentTranscriptions = recentTranscriptionStore.latestEntry(historyRecords: historyService.records) != nil
+        let latestTranscriptionText = dictation.latestCompletedTranscriptionText
+        let hasRecentTranscriptions = latestTranscriptionText != nil
         self.hasRecentTranscriptions = hasRecentTranscriptions
         self.canCopyLastTranscription = hasRecentTranscriptions
+        self.latestTranscriptionText = hasRecentTranscriptions ? latestTranscriptionText : nil
         self.hasRecoverableRecording = audioRecordingService.latestRecoveryRecordingURL != nil
         self.recorderState = recorder.state
         self.canToggleRecorder = recorder.canToggleRecording
@@ -147,11 +150,11 @@ private final class MenuBarState: ObservableObject {
     }
 
     private func refreshCopyAvailability() {
-        let historyService = ServiceContainer.shared.historyService
-        let recentTranscriptionStore = ServiceContainer.shared.recentTranscriptionStore
-        let hasRecentTranscriptions = recentTranscriptionStore.latestEntry(historyRecords: historyService.records) != nil
+        let latestTranscriptionText = DictationViewModel.shared.latestCompletedTranscriptionText
+        let hasRecentTranscriptions = latestTranscriptionText != nil
         self.hasRecentTranscriptions = hasRecentTranscriptions
         canCopyLastTranscription = hasRecentTranscriptions
+        self.latestTranscriptionText = hasRecentTranscriptions ? latestTranscriptionText : nil
     }
 
     private func refreshRecorderToggle(
@@ -361,7 +364,21 @@ struct MenuBarView: View {
             Button {
                 DictationViewModel.shared.copyLastTranscriptionToClipboard()
             } label: {
-                Label(String(localized: "Copy Last Transcription"), systemImage: "doc.on.doc")
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Copy Last Transcription"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Text(verbatim: status.latestTranscriptionText ?? "")
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .frame(width: 248, alignment: .leading)
+                } icon: {
+                    Image(systemName: "doc.on.doc")
+                }
             }
             .keyboardShortcut(keyboardShortcut(from: status.copyLastTranscriptionMenuShortcut))
             .disabled(!status.canCopyLastTranscription)

@@ -75,6 +75,8 @@ final class TextInsertionService {
     }
 
     func requestAccessibilityPermission() {
+        guard !isAccessibilityGranted else { return }
+
         // Try the prompt first
         let options = ["AXTrustedCheckOptionPrompt" as CFString: true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)

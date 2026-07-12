@@ -267,7 +267,8 @@ struct IndicatorActionFeedback: View {
             Text(message)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.9))
-                .lineLimit(2)
+                .lineLimit(isError ? 3 : 2)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 10)

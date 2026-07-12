@@ -77,7 +77,7 @@ struct ErrorLogView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(entry.message)
                         .font(.callout)
-                        .lineLimit(3)
+                        .textSelection(.enabled)
                     HStack(spacing: 6) {
                         Text(entry.categoryDisplayName)
                             .font(.caption)

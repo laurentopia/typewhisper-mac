@@ -7,6 +7,26 @@ import TypeWhisperPluginSDK
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "typewhisper-mac", category: "DictationViewModel")
 
+enum DictationFailureCode: String, CaseIterable {
+    case modelUnavailable = "01"
+    case microphonePermissionRequired = "02"
+    case recordingStartFailed = "03"
+    case recordingInterrupted = "04"
+    case microphoneDisconnected = "05"
+    case sampleTooShort = "06"
+    case noSpeechDetected = "07"
+    case noSpeechRecognized = "08"
+    case transcriptionFailed = "09"
+    case postProcessingFailed = "10"
+    case outputDeliveryFailed = "11"
+
+    static let displayDuration: TimeInterval = 8.0
+
+    func displayMessage(_ message: String) -> String {
+        "\(rawValue)\n\(message)"
+    }
+}
+
 struct DictationSessionTranscription: Sendable, Equatable {
     let text: String
     let rawText: String
@@ -228,7 +248,6 @@ final class DictationViewModel: ObservableObject {
     private let recentTranscriptionPaletteHandler: RecentTranscriptionPaletteHandler
     private let settingsHandler: DictationSettingsHandler
     private var transcriptionTask: Task<Void, Never>?
-    private var errorResetTask: Task<Void, Never>?
     private var insertingResetTask: Task<Void, Never>?
     @Published private var cancelWarningTarget: CancelWarningTarget?
     private var urlResolutionTask: Task<Void, Never>?
@@ -249,8 +268,12 @@ final class DictationViewModel: ObservableObject {
     }
     private var lastStreamingParams: StreamingParamsSnapshot?
     private var isStopInFlight = false
+    /// Holds the in-flight backgrounded audio-engine bring-up so stop/abort/cancel
+    /// paths can serialize against it before tearing the engine down. Without this,
+    /// a fast hotkey release could nil the engine mid-start and orphan a live mic.
+    private var pendingStartTask: Task<Void, Never>?
     private var activeDictationSessionID: UUID?
-    private var pendingPushToTalkDiscardMessage: String?
+    private var activeTranscriptionSessionID: UUID?
     private var recordingStartCuePending = false
     private var firstRecordingAudioBufferSeen = false
     private var pendingRecordingStartedPayload: RecordingStartedPayload?
@@ -443,7 +466,6 @@ final class DictationViewModel: ObservableObject {
         settingsHandler.onHotkeyLabelsChanged = { [weak self] in
             self?.hotkeyLabelsVersion += 1
         }
-        hotkeyService.discardPushToTalkRecordingOnExtraKeyPress = true
     }
 
     var canDictate: Bool {
@@ -618,6 +640,22 @@ final class DictationViewModel: ObservableObject {
         failDictationSession(id: sessionID, error: message)
     }
 
+    private func isCurrentDictationSession(_ sessionID: UUID) -> Bool {
+        activeDictationSessionID == sessionID
+    }
+
+    private func shouldContinueTranscriptionTask(sessionID: UUID) -> Bool {
+        guard !Task.isCancelled else { return false }
+        return activeTranscriptionSessionID == sessionID
+            && activeDictationSessionID == sessionID
+    }
+
+    private func clearTranscriptionTaskIfCurrent(sessionID: UUID) {
+        guard activeTranscriptionSessionID == sessionID else { return }
+        activeTranscriptionSessionID = nil
+        transcriptionTask = nil
+    }
+
     private func restoreRecordingSideEffects() {
         audioDuckingService.restoreAudio()
         mediaPlaybackService.resumeIfWePaused()
@@ -740,12 +778,19 @@ final class DictationViewModel: ObservableObject {
     }
 
     private func abortActiveRecordingImmediately(sessionMessage: String, preserveRecoveryAudio: Bool = false) {
+        // Mark stop-in-flight up front so a backgrounded start (pendingStartTask)
+        // short-circuits its post-await wiring and hands the engine to teardown.
+        isStopInFlight = true
         clearRecordingStartCueState()
         clearDeferredRecordingContext()
         restoreRecordingSideEffects()
         streamingHandler.stop()
         stopRecordingTimer()
         Task {
+            // Wait for any in-flight engine bring-up before tearing it down so we
+            // never nil the engine mid-start and leave the mic live.
+            await pendingStartTask?.value
+            pendingStartTask = nil
             _ = await audioRecordingService.stopRecording(policy: .immediate)
             if preserveRecoveryAudio {
                 audioRecordingService.preserveActiveRecoveryRecording()
@@ -789,10 +834,6 @@ final class DictationViewModel: ObservableObject {
             self?.handleCancelHotkey()
         }
 
-        hotkeyService.onPushToTalkInterruption = { [weak self] in
-            self?.handlePushToTalkInterruption()
-        }
-
         workflowService.$workflows
             .dropFirst()
             .sink { [weak self] workflows in
@@ -826,7 +867,12 @@ final class DictationViewModel: ObservableObject {
                 let errorMessage = error.localizedDescription
                 self.abortActiveRecordingImmediately(sessionMessage: errorMessage, preserveRecoveryAudio: true)
                 self.accessibilityAnnouncementService.announceError(errorMessage)
-                self.showError(errorMessage, category: "recording")
+                self.showDictationFailure(
+                    .recordingInterrupted,
+                    message: errorMessage,
+                    icon: "waveform.badge.exclamationmark",
+                    category: "recording"
+                )
             }
             .store(in: &cancellables)
 
@@ -844,12 +890,11 @@ final class DictationViewModel: ObservableObject {
                 guard let self, self.state == .recording, !self.isStopInFlight else { return }
                 let errorMessage = String(localized: "Microphone disconnected")
                 self.abortActiveRecordingImmediately(sessionMessage: errorMessage)
-                self.showNotchFeedback(
+                self.showDictationFailure(
+                    .microphoneDisconnected,
                     message: errorMessage,
                     icon: "mic.slash",
-                    duration: 3.0,
-                    isError: true,
-                    errorCategory: "recording"
+                    category: "recording"
                 )
             }
             .store(in: &cancellables)
@@ -900,6 +945,7 @@ final class DictationViewModel: ObservableObject {
             showNotchFeedback(message: cancelledMessage, icon: "xmark.circle", duration: 1.5)
         case .processing:
             cancelActiveDictationSessionIfNeeded(message: cancelledMessage)
+            activeTranscriptionSessionID = nil
             transcriptionTask?.cancel()
             transcriptionTask = nil
             audioRecordingService.discardActiveRecoveryRecording()
@@ -921,12 +967,12 @@ final class DictationViewModel: ObservableObject {
         if transcriptionTask != nil {
             cancelActiveDictationSessionIfNeeded()
         }
+        activeTranscriptionSessionID = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
         insertingResetTask?.cancel()
         insertingResetTask = nil
         clearCancelWarning()
-        pendingPushToTalkDiscardMessage = nil
         metadataCaptureTask?.cancel()
         metadataCaptureTask = nil
         urlResolutionTask?.cancel()
@@ -938,28 +984,92 @@ final class DictationViewModel: ObservableObject {
         guard canDictate else {
             let errorMessage = TranscriptionEngineError.modelNotLoaded.localizedDescription
             failDictationSession(id: sessionID, error: errorMessage)
-            showError(errorMessage, category: "recording")
+            showDictationFailure(.modelUnavailable, message: errorMessage, category: "recording")
             return
         }
 
         guard audioRecordingService.hasMicrophonePermission else {
             let errorMessage = "Microphone permission required."
             failDictationSession(id: sessionID, error: errorMessage)
-            showError(errorMessage, category: "recording")
+            showDictationFailure(
+                .microphonePermissionRequired,
+                message: errorMessage,
+                icon: "mic.slash",
+                category: "recording"
+            )
             return
         }
 
-        do {
-            let initialForcedWorkflow = forcedWorkflow(for: forcedWorkflowId)
-            audioRecordingService.microphoneBoostEnabled = microphoneBoostEnabled(for: initialForcedWorkflow)
-            audioRecordingService.selectedDeviceID = audioDeviceService.selectedDeviceID
-            audioRecordingService.hasExplicitDeviceSelection = audioDeviceService.selectedDeviceUID != nil
-            let selectedInputUsesBluetooth = audioDeviceService.selectedDeviceUsesBluetoothTransport
-            audioRecordingService.selectedInputDeviceUsesBluetoothTransport = selectedInputUsesBluetooth
-            prepareRecordingStartCue(playsSound: !selectedInputUsesBluetooth)
-            playRecordingStartSoundIfNeeded()
+        let initialForcedWorkflow = forcedWorkflow(for: forcedWorkflowId)
+        audioRecordingService.microphoneBoostEnabled = microphoneBoostEnabled(for: initialForcedWorkflow)
+        audioRecordingService.selectedDeviceID = audioDeviceService.selectedDeviceID
+        audioRecordingService.hasExplicitDeviceSelection = audioDeviceService.selectedDeviceUID != nil
+        let selectedInputUsesBluetooth = audioDeviceService.selectedDeviceUsesBluetoothTransport
+        audioRecordingService.selectedInputDeviceUsesBluetoothTransport = selectedInputUsesBluetooth
+        prepareRecordingStartCue(playsSound: !selectedInputUsesBluetooth)
+        playRecordingStartSoundIfNeeded()
+
+        // Paint the indicator panel immediately: the panels observe `$state`, so
+        // flipping to `.recording` BEFORE the (slow, synchronous) audio-engine
+        // bring-up — which is offloaded below — lets the UI appear within one
+        // runloop turn instead of waiting ~1s for engine.start() to return.
+        promptPaletteHandler.hide()
+        recentTranscriptionPaletteHandler.hide()
+        modelManager.cancelAutoUnloadTimer()
+        if selectedInputUsesBluetooth {
+            logger.info("Skipping recording start sound for Bluetooth input device")
+        }
+        if mediaPauseEnabled { mediaPlaybackService.pauseIfPlaying() }
+        if audioDuckingEnabled {
+            pendingRecordingAudioDuckingLevel = max(0, min(1, Float(audioDuckingLevel)))
+        } else {
+            pendingRecordingAudioDuckingLevel = nil
+        }
+        state = .recording
+        // Reset hotkey timer so hybrid threshold counts from recording start,
+        // not from key press. Slow device init (e.g. iPhone Continuity ~2-3s)
+        // would otherwise make the hold appear as "long press" → PTT stop.
+        hotkeyService.resetKeyDownTime()
+        partialText = ""
+        isStopInFlight = false
+        recordingStartTime = Date()
+        startRecordingTimer()
+
+        // Paint the panel first, then bring the engine up. The bring-up MUST run on
+        // the main actor: AudioRecordingService mutates @Published state (isRecording,
+        // recoveryError) synchronously, and publishing those off the main thread traps
+        // (EXC_BREAKPOINT in the Combine sink). We hop one runloop turn so SwiftUI
+        // commits the `.recording` panel before the (brief, main-thread) bring-up, so
+        // the panel still appears within one runloop turn instead of after engine.start.
+        let service = audioRecordingService
+        pendingStartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            // A stop/abort/cancel may have raced in during the runloop hop.
+            guard self.activeDictationSessionID == sessionID, !self.isStopInFlight else {
+                self.pendingStartTask = nil
+                return
+            }
             let audioStartTimestamp = DispatchTime.now().uptimeNanoseconds
-            try audioRecordingService.startRecording(requestUptimeNanoseconds: requestUptimeNanoseconds)
+            do {
+                try service.startRecording(requestUptimeNanoseconds: requestUptimeNanoseconds)
+            } catch {
+                self.handleStartRecordingFailure(error, sessionID: sessionID)
+                self.pendingStartTask = nil
+                return
+            }
+
+            // A stop/abort/cancel may have raced in while the engine was starting.
+            // If so, the teardown path is awaiting this task; let it own the engine.
+            guard self.activeDictationSessionID == sessionID,
+                  self.state == .recording,
+                  !self.isStopInFlight else {
+                self.pendingStartTask = nil
+                return
+            }
+
             let audioStartCompletedTimestamp = DispatchTime.now().uptimeNanoseconds
             let audioStartMs = Self.elapsedMilliseconds(
                 from: audioStartTimestamp,
@@ -969,49 +1079,28 @@ final class DictationViewModel: ObservableObject {
                 from: requestUptimeNanoseconds,
                 to: audioStartCompletedTimestamp
             )
-            promptPaletteHandler.hide()
-            recentTranscriptionPaletteHandler.hide()
-            modelManager.cancelAutoUnloadTimer()
-            if selectedInputUsesBluetooth {
-                logger.info("Skipping recording start sound for Bluetooth input device")
-            }
-            if mediaPauseEnabled { mediaPlaybackService.pauseIfPlaying() }
-            if audioDuckingEnabled {
-                pendingRecordingAudioDuckingLevel = max(0, min(1, Float(audioDuckingLevel)))
-            } else {
-                pendingRecordingAudioDuckingLevel = nil
-            }
-            state = .recording
-            // Reset hotkey timer so hybrid threshold counts from recording start,
-            // not from key press. Slow device init (e.g. iPhone Continuity ~2-3s)
-            // would otherwise make the hold appear as "long press" → PTT stop.
-            hotkeyService.resetKeyDownTime()
-            partialText = ""
-            isStopInFlight = false
-            recordingStartTime = Date()
-            startRecordingTimer()
 
             let contextStartTimestamp = CFAbsoluteTimeGetCurrent()
             // Match rule after the audio engine is live so app/context lookup does
             // not delay capture of the user's first spoken words.
-            let activeApp = textInsertionService.captureActiveApp()
-            capturedActiveApp = activeApp
-            capturedSelectedText = nil
-            activeAppIcon = nil
+            let activeApp = self.textInsertionService.captureActiveApp()
+            self.capturedActiveApp = activeApp
+            self.capturedSelectedText = nil
+            self.activeAppIcon = nil
 
             if let forcedWorkflow = initialForcedWorkflow {
-                applyWorkflowMatch(workflowService.forcedWorkflowMatch(for: forcedWorkflow), activeApp: activeApp)
-            } else if let workflowMatch = workflowService.matchWorkflow(bundleIdentifier: activeApp.bundleId, url: nil) {
-                applyWorkflowMatch(workflowMatch, activeApp: activeApp)
+                self.applyWorkflowMatch(self.workflowService.forcedWorkflowMatch(for: forcedWorkflow), activeApp: activeApp)
+            } else if let workflowMatch = self.workflowService.matchWorkflow(bundleIdentifier: activeApp.bundleId, url: nil) {
+                self.applyWorkflowMatch(workflowMatch, activeApp: activeApp)
             } else {
-                clearActiveRuleState()
+                self.clearActiveRuleState()
             }
-            applyEffectiveMicrophoneBoostToAudioService()
-            updateRecordingStartCuePayload(activeApp: activeApp)
+            self.applyEffectiveMicrophoneBoostToAudioService()
+            self.updateRecordingStartCuePayload(activeApp: activeApp)
             let contextMs = (CFAbsoluteTimeGetCurrent() - contextStartTimestamp) * 1000
 
-            startLiveStreaming(allowLiveTranscription: indicatorTranscriptPreviewEnabled || externalStreamingDisplayCount > 0)
-            scheduleDeferredRecordingMetadataCapture(
+            self.startLiveStreaming(allowLiveTranscription: self.indicatorTranscriptPreviewEnabled || self.externalStreamingDisplayCount > 0)
+            self.scheduleDeferredRecordingMetadataCapture(
                 activeApp: activeApp,
                 forcedWorkflowId: forcedWorkflowId
             )
@@ -1020,26 +1109,38 @@ final class DictationViewModel: ObservableObject {
             logger.info(
                 "Recording started: requestToAudioStartMs=\(Self.formatMilliseconds(requestToAudioStartMs), privacy: .public), audioStartMs=\(Self.formatMilliseconds(audioStartMs), privacy: .public), contextMs=\(String(format: "%.1f", contextMs), privacy: .public), totalStartMs=\(String(format: "%.1f", totalStartMs), privacy: .public)"
             )
-        } catch {
-            clearRecordingStartCueState()
-            clearDeferredRecordingContext()
-            restoreRecordingSideEffects()
-            let errorMessage: String
-            if let recordingError = error as? AudioRecordingService.AudioRecordingError,
-               case .noMicrophoneDetected = recordingError {
-                errorMessage = String(localized: "No mic detected.")
-            } else if let recordingError = error as? AudioRecordingService.AudioRecordingError,
-                      case .selectedInputDeviceIncompatible(let issue) = recordingError {
-                audioDeviceService.markSelectedDeviceCompatibility(.incompatible(issue))
-                errorMessage = recordingError.localizedDescription
-            } else {
-                errorMessage = error.localizedDescription
-            }
-            accessibilityAnnouncementService.announceError(errorMessage)
-            failDictationSession(id: sessionID, error: errorMessage)
-            showError(errorMessage, category: "recording")
-            hotkeyService.cancelDictation()
+            self.pendingStartTask = nil
         }
+    }
+
+    /// Unwinds an audio-engine bring-up that threw, restoring all side effects and
+    /// returning the session to `.idle`. Factored out of `startRecording()` so the
+    /// backgrounded start path can reuse the exact same failure handling.
+    private func handleStartRecordingFailure(_ error: Error, sessionID: UUID) {
+        clearRecordingStartCueState()
+        clearDeferredRecordingContext()
+        restoreRecordingSideEffects()
+        // The timer now starts before the (backgrounded) engine bring-up, so a
+        // failed start must stop it here; otherwise it keeps firing post-failure.
+        stopRecordingTimer()
+        let errorMessage: String
+        if let recordingError = error as? AudioRecordingService.AudioRecordingError,
+           case .noMicrophoneDetected = recordingError {
+            errorMessage = String(localized: "No mic detected.")
+        } else if let recordingError = error as? AudioRecordingService.AudioRecordingError,
+                  case .selectedInputDeviceIncompatible(let issue) = recordingError {
+            audioDeviceService.markSelectedDeviceCompatibility(.incompatible(issue))
+            errorMessage = recordingError.localizedDescription
+        } else {
+            errorMessage = error.localizedDescription
+        }
+        accessibilityAnnouncementService.announceError(errorMessage)
+        failDictationSession(id: sessionID, error: errorMessage)
+        // Failure feedback takes over the panel (state = .inserting)
+        // and auto-resets to .idle after its duration, so the early-set
+        // state = .recording does not leave the panel stuck open on failure.
+        showDictationFailure(.recordingStartFailed, message: errorMessage, category: "recording")
+        hotkeyService.cancelDictation()
     }
 
     private func scheduleDeferredRecordingMetadataCapture(
@@ -1163,38 +1264,33 @@ final class DictationViewModel: ObservableObject {
     }
 
     private func stopDictation() {
-        guard state == .recording, !isStopInFlight else { return }
+        guard state == .recording, !isStopInFlight, let sessionID = activeDictationSessionID else { return }
         clearCancelWarning()
         isStopInFlight = true
         Task {
-            await finalizeStopDictation()
+            await finalizeStopDictation(sessionID: sessionID)
         }
     }
 
-    private func finalizeStopDictation() async {
-        let sessionID = activeDictationSessionID
+    private func finalizeStopDictation(sessionID: UUID) async {
+        // Serialize against a backgrounded engine bring-up: awaiting guarantees the
+        // engine is fully started (or failed) before stopRecording() claims+nils it,
+        // so a sub-second press can never orphan a live mic.
+        await pendingStartTask?.value
+        pendingStartTask = nil
 
-        clearRecordingStartCueState(resetReadiness: false)
-        restoreRecordingSideEffects()
-        if let discardMessage = pendingPushToTalkDiscardMessage {
-            pendingPushToTalkDiscardMessage = nil
-            streamingHandler.stop()
-            lastStreamingParams = nil
-            stopRecordingTimer()
-            _ = await audioRecordingService.stopRecording(policy: .immediate)
-            audioRecordingService.discardActiveRecoveryRecording()
-            if let sessionID {
-                failDictationSession(id: sessionID, error: discardMessage)
-            }
-            showNotchFeedback(
-                message: discardMessage,
-                icon: "xmark.circle",
-                duration: 1.8
-            )
+        guard isCurrentDictationSession(sessionID) else {
+            logger.info("Ignoring stale stop finalization for superseded dictation session")
             return
         }
 
+        clearRecordingStartCueState(resetReadiness: false)
+        restoreRecordingSideEffects()
         let liveSessionResult = await streamingHandler.finish()
+        guard isCurrentDictationSession(sessionID) else {
+            logger.info("Ignoring stale streaming result for superseded dictation session")
+            return
+        }
         lastStreamingParams = nil
         stopRecordingTimer()
         let previewText = partialText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1212,6 +1308,11 @@ final class DictationViewModel: ObservableObject {
 
         let stopPolicy = AudioRecordingService.StopPolicy.finalizeShortSpeech()
         var samples = await audioRecordingService.stopRecording(policy: stopPolicy)
+        guard isCurrentDictationSession(sessionID) else {
+            logger.info("Ignoring stale recording stop result for superseded dictation session")
+            return
+        }
+        isStopInFlight = false
         let peakLevel = audioRecordingService.peakRawAudioLevel
         let rawDuration = Double(samples.count) / AudioRecordingService.targetSampleRate
         let decision = classifyShortSpeech(
@@ -1230,26 +1331,24 @@ final class DictationViewModel: ObservableObject {
         case .discardTooShort:
             audioRecordingService.discardActiveRecoveryRecording()
             let errorMessage = String(localized: "Too short, hold the hotkey a bit longer")
-            if let sessionID {
-                failDictationSession(id: sessionID, error: errorMessage)
-            }
-            showNotchFeedback(
+            failDictationSession(id: sessionID, error: errorMessage)
+            showDictationFailure(
+                .sampleTooShort,
                 message: errorMessage,
                 icon: "waveform.badge.exclamationmark",
-                duration: 1.8
+                category: "recording"
             )
             return
         case .discardNoSpeech:
             audioRecordingService.discardActiveRecoveryRecording()
             logger.info("Peak level too low (\(String(format: "%.4f", peakLevel))) - no speech detected")
             let errorMessage = String(localized: "No speech detected")
-            if let sessionID {
-                failDictationSession(id: sessionID, error: errorMessage)
-            }
-            showNotchFeedback(
+            failDictationSession(id: sessionID, error: errorMessage)
+            showDictationFailure(
+                .noSpeechDetected,
                 message: errorMessage,
                 icon: "mic.slash",
-                duration: 2.0
+                category: "recording"
             )
             return
         case .transcribe:
@@ -1270,10 +1369,17 @@ final class DictationViewModel: ObservableObject {
         processingPhase = String(localized: "Transcribing...")
         markActiveDictationSessionProcessingIfNeeded()
 
+        activeTranscriptionSessionID = sessionID
         transcriptionTask = Task {
+            defer {
+                self.clearTranscriptionTaskIfCurrent(sessionID: sessionID)
+            }
+
+            var failureCode = DictationFailureCode.transcriptionFailed
             do {
                 // Wait for browser URL resolution so URL-based profile overrides apply
                 await urlResolutionTask?.value
+                guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
 
                 let activeApp = capturedActiveApp ?? textInsertionService.captureActiveApp()
                 let languageSelection = effectiveLanguageSelection
@@ -1302,22 +1408,21 @@ final class DictationViewModel: ObservableObject {
                 }
 
                 // Bail out if a new recording started while we were transcribing
-                guard !Task.isCancelled else { return }
+                guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
 
                 var text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else {
+                    guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
                     logger.info("Transcription returned empty text (duration: \(String(format: "%.2f", result.duration))s, engine: \(result.engineUsed))")
                     audioRecordingService.preserveActiveRecoveryRecording()
                     let errorMessage = String(localized: "No speech recognized")
-                    if let sessionID {
-                        failDictationSession(id: sessionID, error: errorMessage)
-                    }
-                    showNotchFeedback(
+                    failDictationSession(id: sessionID, error: errorMessage)
+                    showDictationFailure(
+                        .noSpeechRecognized,
                         message: errorMessage,
                         icon: "text.magnifyingglass",
-                        duration: 2.0
+                        category: "transcription"
                     )
-                    soundService.play(.error, enabled: soundFeedbackEnabled)
                     return
                 }
 
@@ -1327,9 +1432,10 @@ final class DictationViewModel: ObservableObject {
                     configuredLanguage: language
                 )
 
-                guard !Task.isCancelled else { return }
+                guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
 
                 // Post-processing pipeline (priority-based)
+                failureCode = .postProcessingFailed
                 let llmStepName: String? = if llmHandler != nil {
                     if self.matchedWorkflow != nil {
                         "Workflow"
@@ -1341,6 +1447,7 @@ final class DictationViewModel: ObservableObject {
                 }
                 self.processingPhase = String(localized: "Processing...")
                 await metadataCaptureTask?.value
+                guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
                 let ppContext = PostProcessingContext(
                     appName: activeApp.name,
                     bundleIdentifier: activeApp.bundleId,
@@ -1365,8 +1472,9 @@ final class DictationViewModel: ObservableObject {
                     llmStepName: llmStepName,
                     normalizeNumbers: self.effectiveNumberNormalizationOverride
                 )
+                guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
                 text = ppResult.text
-                let transcriptionID = sessionID ?? UUID()
+                let transcriptionID = sessionID
                 let completionTimestamp = Date()
                 recentTranscriptionStore.recordTranscription(
                     id: transcriptionID,
@@ -1379,12 +1487,15 @@ final class DictationViewModel: ObservableObject {
                 partialText = ""
 
                 // Route to action plugin or insert text
+                failureCode = .outputDeliveryFailed
                 if let actionPluginId = self.effectiveActionPluginId,
                    let actionPlugin = PluginManager.shared.actionPlugin(for: actionPluginId) {
+                    guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
                     try await executeActionPlugin(
                         actionPlugin, pluginId: actionPluginId, text: text,
                         activeApp: activeApp, language: language, originalText: result.text
                     )
+                    guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
                 } else {
                     let contextualInsertionEnabled = DictationInsertionTextFormatter.contextualInsertionEnabled()
                     let insertionContext = contextualInsertionEnabled
@@ -1395,12 +1506,14 @@ final class DictationViewModel: ObservableObject {
                         insertionContext: insertionContext,
                         contextualInsertionEnabled: contextualInsertionEnabled
                     )
+                    guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
                     let insertionResult = try await textInsertionService.insertText(
                         insertionText,
                         preserveClipboard: preserveClipboard,
                         autoEnter: self.effectiveAutoEnterEnabled,
                         outputFormat: self.effectiveOutputFormat
                     )
+                    guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
                     if case .pasted(.unverified(let reason)) = insertionResult {
                         logger.info(
                             "Text insertion paste could not be verified; continuing with clipboard paste fallback. reason=\(reason.rawValue, privacy: .public), app=\(activeApp.bundleId ?? "nil", privacy: .public)"
@@ -1465,9 +1578,7 @@ final class DictationViewModel: ObservableObject {
                     model: modelDisplayName,
                     wordsCount: wordCount
                 )
-                if let sessionID {
-                    completeDictationSession(id: sessionID, transcription: completedTranscription)
-                }
+                completeDictationSession(id: sessionID, transcription: completedTranscription)
                 accessibilityAnnouncementService.announceTranscriptionComplete(wordCount: wordCount)
                 speechFeedbackService.speakAutomaticTranscription(text: text, language: detectedLang)
                 lastTranscribedText = text
@@ -1482,23 +1593,24 @@ final class DictationViewModel: ObservableObject {
                     resetDictationState()
                 }
             } catch {
-                guard !Task.isCancelled else { return }
+                guard self.shouldContinueTranscriptionTask(sessionID: sessionID) else { return }
                 audioRecordingService.preserveActiveRecoveryRecording()
                 EventBus.shared.emit(.transcriptionFailed(TranscriptionFailedPayload(
                     error: error.localizedDescription,
                     appName: capturedActiveApp?.name,
                     bundleIdentifier: capturedActiveApp?.bundleId
                 )))
-                if let sessionID {
-                    failDictationSession(id: sessionID, error: error.localizedDescription)
-                }
+                failDictationSession(id: sessionID, error: error.localizedDescription)
                 accessibilityAnnouncementService.announceError(error.localizedDescription)
-                showError(error.localizedDescription, category: "transcription")
+                showDictationFailure(
+                    failureCode,
+                    message: error.localizedDescription,
+                    category: failureCode == .outputDeliveryFailed ? "insertion" : "transcription"
+                )
                 clearActiveRuleState()
                 capturedActiveApp = nil
                 activeAppIcon = nil
             }
-            self.transcriptionTask = nil
         }
     }
 
@@ -1525,7 +1637,6 @@ final class DictationViewModel: ObservableObject {
     func registerInitialProfileHotkeys() { registerInitialTriggerHotkeys() }
 
     private func resetDictationState() {
-        errorResetTask?.cancel()
         insertingResetTask?.cancel()
         insertingResetTask = nil
         urlResolutionTask?.cancel()
@@ -1534,8 +1645,9 @@ final class DictationViewModel: ObservableObject {
         metadataCaptureTask = nil
         lastStreamingParams = nil
         isStopInFlight = false
+        pendingStartTask = nil
         activeDictationSessionID = nil
-        pendingPushToTalkDiscardMessage = nil
+        activeTranscriptionSessionID = nil
         clearRecordingStartCueState()
         clearCancelWarning()
         state = .idle
@@ -1550,11 +1662,6 @@ final class DictationViewModel: ObservableObject {
         actionFeedbackIcon = nil
         actionFeedbackIsError = false
         actionDisplayDuration = 3.5
-    }
-
-    private func handlePushToTalkInterruption() {
-        guard state == .recording, !isStopInFlight else { return }
-        pendingPushToTalkDiscardMessage = String(localized: "Recording discarded because additional keys were pressed")
     }
 
     private func applyWorkflowMatch(
@@ -1839,14 +1946,21 @@ final class DictationViewModel: ObservableObject {
 
     // MARK: - Workflow Palette
 
+    var latestCompletedTranscriptionText: String? {
+        guard let entry = recentTranscriptionStore.latestEntry(historyRecords: historyService.records) else {
+            return nil
+        }
+
+        let text = entry.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
     var canCopyLastTranscription: Bool {
-        recentTranscriptionStore.latestEntry(historyRecords: historyService.records) != nil
+        latestCompletedTranscriptionText != nil
     }
 
     func copyLastTranscriptionToClipboard() {
-        guard let entry = recentTranscriptionStore.latestEntry(historyRecords: historyService.records) else { return }
-        let text = entry.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard let text = latestCompletedTranscriptionText else { return }
 
         let pasteboard = pasteboardProvider()
         pasteboard.clearContents()
@@ -1920,6 +2034,22 @@ final class DictationViewModel: ObservableObject {
     private func showError(_ message: String, category: String = "general") {
         soundService.play(.error, enabled: soundFeedbackEnabled)
         showNotchFeedback(message: message, icon: "xmark.circle.fill", duration: 3.0, isError: true, errorCategory: category)
+    }
+
+    private func showDictationFailure(
+        _ code: DictationFailureCode,
+        message: String,
+        icon: String = "xmark.circle.fill",
+        category: String
+    ) {
+        soundService.play(.error, enabled: soundFeedbackEnabled)
+        showNotchFeedback(
+            message: code.displayMessage(message),
+            icon: icon,
+            duration: DictationFailureCode.displayDuration,
+            isError: true,
+            errorCategory: category
+        )
     }
 
     private func startRecordingTimer() {
