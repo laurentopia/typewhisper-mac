@@ -250,7 +250,6 @@ final class DictationViewModel: ObservableObject {
     private var lastStreamingParams: StreamingParamsSnapshot?
     private var isStopInFlight = false
     private var activeDictationSessionID: UUID?
-    private var pendingPushToTalkDiscardMessage: String?
     private var recordingStartCuePending = false
     private var firstRecordingAudioBufferSeen = false
     private var pendingRecordingStartedPayload: RecordingStartedPayload?
@@ -443,7 +442,6 @@ final class DictationViewModel: ObservableObject {
         settingsHandler.onHotkeyLabelsChanged = { [weak self] in
             self?.hotkeyLabelsVersion += 1
         }
-        hotkeyService.discardPushToTalkRecordingOnExtraKeyPress = true
     }
 
     var canDictate: Bool {
@@ -789,10 +787,6 @@ final class DictationViewModel: ObservableObject {
             self?.handleCancelHotkey()
         }
 
-        hotkeyService.onPushToTalkInterruption = { [weak self] in
-            self?.handlePushToTalkInterruption()
-        }
-
         workflowService.$workflows
             .dropFirst()
             .sink { [weak self] workflows in
@@ -926,7 +920,6 @@ final class DictationViewModel: ObservableObject {
         insertingResetTask?.cancel()
         insertingResetTask = nil
         clearCancelWarning()
-        pendingPushToTalkDiscardMessage = nil
         metadataCaptureTask?.cancel()
         metadataCaptureTask = nil
         urlResolutionTask?.cancel()
@@ -1176,24 +1169,6 @@ final class DictationViewModel: ObservableObject {
 
         clearRecordingStartCueState(resetReadiness: false)
         restoreRecordingSideEffects()
-        if let discardMessage = pendingPushToTalkDiscardMessage {
-            pendingPushToTalkDiscardMessage = nil
-            streamingHandler.stop()
-            lastStreamingParams = nil
-            stopRecordingTimer()
-            _ = await audioRecordingService.stopRecording(policy: .immediate)
-            audioRecordingService.discardActiveRecoveryRecording()
-            if let sessionID {
-                failDictationSession(id: sessionID, error: discardMessage)
-            }
-            showNotchFeedback(
-                message: discardMessage,
-                icon: "xmark.circle",
-                duration: 1.8
-            )
-            return
-        }
-
         let liveSessionResult = await streamingHandler.finish()
         lastStreamingParams = nil
         stopRecordingTimer()
@@ -1535,7 +1510,6 @@ final class DictationViewModel: ObservableObject {
         lastStreamingParams = nil
         isStopInFlight = false
         activeDictationSessionID = nil
-        pendingPushToTalkDiscardMessage = nil
         clearRecordingStartCueState()
         clearCancelWarning()
         state = .idle
@@ -1550,11 +1524,6 @@ final class DictationViewModel: ObservableObject {
         actionFeedbackIcon = nil
         actionFeedbackIsError = false
         actionDisplayDuration = 3.5
-    }
-
-    private func handlePushToTalkInterruption() {
-        guard state == .recording, !isStopInFlight else { return }
-        pendingPushToTalkDiscardMessage = String(localized: "Recording discarded because additional keys were pressed")
     }
 
     private func applyWorkflowMatch(
@@ -1839,14 +1808,21 @@ final class DictationViewModel: ObservableObject {
 
     // MARK: - Workflow Palette
 
+    var latestCompletedTranscriptionText: String? {
+        guard let entry = recentTranscriptionStore.latestEntry(historyRecords: historyService.records) else {
+            return nil
+        }
+
+        let text = entry.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
     var canCopyLastTranscription: Bool {
-        recentTranscriptionStore.latestEntry(historyRecords: historyService.records) != nil
+        latestCompletedTranscriptionText != nil
     }
 
     func copyLastTranscriptionToClipboard() {
-        guard let entry = recentTranscriptionStore.latestEntry(historyRecords: historyService.records) else { return }
-        let text = entry.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard let text = latestCompletedTranscriptionText else { return }
 
         let pasteboard = pasteboardProvider()
         pasteboard.clearContents()

@@ -178,17 +178,12 @@ final class HotkeyService: ObservableObject {
     var onWorkflowDictationStart: ((UUID, UInt64) -> Void)?
     var onWorkflowTextProcessing: ((UUID) -> Void)?
     var onCancelPressed: (() -> Void)?
-    var onPushToTalkInterruption: (() -> Void)?
-    var discardPushToTalkRecordingOnExtraKeyPress = false
-
     private var keyDownTime: Date?
     private var isActive = false
     private var activeSlotType: HotkeySlotType?
     private var activeGlobalHotkey: UnifiedHotkey?
     private(set) var activeProfileId: UUID?
     private(set) var activeWorkflowId: UUID?
-    private var pushToTalkInterruptionSignaled = false
-
     private static let toggleThreshold: TimeInterval = 1.0
     private static let doubleTapThreshold: TimeInterval = 0.4
     private static let monitorDedupWindow: TimeInterval = 0.12
@@ -378,7 +373,6 @@ final class HotkeyService: ObservableObject {
         activeWorkflowId = nil
         currentMode = nil
         keyDownTime = nil
-        pushToTalkInterruptionSignaled = false
     }
 
     // MARK: - Profile Hotkeys
@@ -683,7 +677,6 @@ final class HotkeyService: ObservableObject {
             return false
         }
 
-        signalPushToTalkInterruptionIfNeeded(for: event)
         updateCapsLockOriginTracker(for: event)
         var shouldSuppress = false
 
@@ -920,34 +913,6 @@ final class HotkeyService: ObservableObject {
             source: source
         ) {
             handleWorkflowKeyUp(workflowId: workflowId, behavior: behavior)
-        }
-    }
-
-    private func signalPushToTalkInterruptionIfNeeded(for event: NSEvent) {
-        guard discardPushToTalkRecordingOnExtraKeyPress,
-              !pushToTalkInterruptionSignaled,
-              isActive,
-              activeSlotType == .pushToTalk,
-              activeProfileId == nil,
-              activeWorkflowId == nil,
-              event.type == .keyDown,
-              let hotkey = activeGlobalHotkey,
-              isExtraKeyDuringActivePushToTalk(event, hotkey: hotkey) else {
-            return
-        }
-
-        pushToTalkInterruptionSignaled = true
-        onPushToTalkInterruption?()
-    }
-
-    private func isExtraKeyDuringActivePushToTalk(_ event: NSEvent, hotkey: UnifiedHotkey) -> Bool {
-        switch hotkey.kind {
-        case .modifierCombo, .modifierOnly, .fn:
-            return true
-        case .keyWithModifiers, .bareKey:
-            return event.keyCode != hotkey.keyCode
-        case .mouseButton:
-            return false
         }
     }
 
@@ -1279,7 +1244,13 @@ final class HotkeyService: ObservableObject {
 
     // MARK: - Key Down / Up (Global Slots)
 
+    private var isPushToTalkHoldActive: Bool {
+        isActive && currentMode == .pushToTalk
+    }
+
     private func handleKeyDown(slotType: HotkeySlotType, hotkey: UnifiedHotkey) {
+        guard !isPushToTalkHoldActive else { return }
+
         if slotType == .promptPalette {
             onPromptPaletteToggle?()
             return
@@ -1306,7 +1277,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         } else {
             let requestTimestamp = Self.requestTimestamp()
@@ -1316,7 +1286,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             keyDownTime = Date()
             isActive = true
-            pushToTalkInterruptionSignaled = false
             currentMode = slotType == .toggle ? .toggle : .pushToTalk
             onDictationStart?(requestTimestamp)
         }
@@ -1336,7 +1305,6 @@ final class HotkeyService: ObservableObject {
                 activeGlobalHotkey = nil
                 currentMode = nil
                 keyDownTime = nil
-                pushToTalkInterruptionSignaled = false
                 onDictationStop?()
             }
         case .pushToTalk:
@@ -1345,7 +1313,6 @@ final class HotkeyService: ObservableObject {
             activeGlobalHotkey = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         case .toggle:
             break
@@ -1363,6 +1330,8 @@ final class HotkeyService: ObservableObject {
     // MARK: - Key Down / Up (Profile Slots)
 
     private func handleProfileKeyDown(profileId: UUID) {
+        guard !isPushToTalkHoldActive else { return }
+
         if isActive {
             // Any hotkey stops active recording
             isActive = false
@@ -1372,7 +1341,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         } else {
             let requestTimestamp = Self.requestTimestamp()
@@ -1382,7 +1350,6 @@ final class HotkeyService: ObservableObject {
             activeGlobalHotkey = nil
             keyDownTime = Date()
             isActive = true
-            pushToTalkInterruptionSignaled = false
             currentMode = .pushToTalk // hybrid behavior
             onProfileDictationStart?(profileId, requestTimestamp)
         }
@@ -1403,7 +1370,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         }
     }
@@ -1411,6 +1377,8 @@ final class HotkeyService: ObservableObject {
     // MARK: - Key Down / Up (Workflow Slots)
 
     private func handleWorkflowKeyDown(workflowId: UUID, behavior: WorkflowHotkeyBehavior) {
+        guard !isPushToTalkHoldActive else { return }
+
         guard behavior == .startDictation else {
             onWorkflowTextProcessing?(workflowId)
             return
@@ -1424,7 +1392,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         } else {
             let requestTimestamp = Self.requestTimestamp()
@@ -1434,7 +1401,6 @@ final class HotkeyService: ObservableObject {
             activeGlobalHotkey = nil
             keyDownTime = Date()
             isActive = true
-            pushToTalkInterruptionSignaled = false
             currentMode = .pushToTalk
             onWorkflowDictationStart?(workflowId, requestTimestamp)
         }
@@ -1455,7 +1421,6 @@ final class HotkeyService: ObservableObject {
             activeWorkflowId = nil
             currentMode = nil
             keyDownTime = nil
-            pushToTalkInterruptionSignaled = false
             onDictationStop?()
         }
     }

@@ -3249,53 +3249,6 @@ final class APIRouterAndHandlersTests: XCTestCase {
     }
 
     @MainActor
-    func testPushToTalkInterruptionDiscardStopsImmediatelyAndMarksSessionFailedByDefault() async throws {
-        let appSupportDirectory = try TestSupport.makeTemporaryDirectory()
-        var dictationContext: DictationContext?
-        defer {
-            dictationContext = nil
-            TestSupport.remove(appSupportDirectory)
-        }
-
-        dictationContext = Self.makeDictationContext(appSupportDirectory: appSupportDirectory)
-        let context = try XCTUnwrap(dictationContext)
-        XCTAssertTrue(context.hotkeyService.discardPushToTalkRecordingOnExtraKeyPress)
-
-        var stopPolicies: [String] = []
-        context.audioRecordingService.hasMicrophonePermissionOverride = true
-        context.audioRecordingService.inputAvailabilityOverride = { _ in true }
-        context.audioRecordingService.startRecordingOverride = {}
-        context.audioRecordingService.stopRecordingOverride = { policy in
-            stopPolicies.append(policy.logDescription)
-            return []
-        }
-
-        let sessionID = context.dictationViewModel.apiStartRecording()
-        XCTAssertEqual(context.dictationViewModel.state, .recording)
-
-        context.hotkeyService.onPushToTalkInterruption?()
-        _ = context.dictationViewModel.apiStopRecording()
-
-        for _ in 0..<20 {
-            if context.dictationViewModel.apiDictationSession(id: sessionID)?.status == .failed {
-                break
-            }
-            try? await Task.sleep(for: .milliseconds(25))
-        }
-
-        XCTAssertEqual(stopPolicies, [AudioRecordingService.StopPolicy.immediate.logDescription])
-        XCTAssertEqual(
-            context.dictationViewModel.actionFeedbackMessage,
-            "Recording discarded because additional keys were pressed"
-        )
-        XCTAssertEqual(context.dictationViewModel.apiDictationSession(id: sessionID)?.status, .failed)
-        XCTAssertEqual(
-            context.dictationViewModel.apiDictationSession(id: sessionID)?.error,
-            "Recording discarded because additional keys were pressed"
-        )
-    }
-
-    @MainActor
     func testApiStartRecording_ignoresLegacyBundleProfileBeforeDeferredMetadataCapture() async throws {
         let appSupportDirectory = try TestSupport.makeTemporaryDirectory()
         var dictationContext: DictationContext?
@@ -4958,6 +4911,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
             appBundleIdentifier: "com.apple.Notes"
         )
 
+        XCTAssertEqual(context.dictationViewModel.latestCompletedTranscriptionText, "Newest session text")
         context.dictationViewModel.copyLastTranscriptionToClipboard()
 
         XCTAssertEqual(pasteboard.string(forType: .string), "Newest session text")
@@ -4988,6 +4942,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
             engineUsed: "mock"
         )
 
+        XCTAssertEqual(context.dictationViewModel.latestCompletedTranscriptionText, "History fallback text")
         context.dictationViewModel.copyLastTranscriptionToClipboard()
 
         XCTAssertEqual(pasteboard.string(forType: .string), "History fallback text")
@@ -5009,6 +4964,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         pasteboard.setString("Existing", forType: .string)
         context.dictationViewModel.pasteboardProvider = { pasteboard }
 
+        XCTAssertNil(context.dictationViewModel.latestCompletedTranscriptionText)
         context.dictationViewModel.copyLastTranscriptionToClipboard()
 
         XCTAssertEqual(pasteboard.string(forType: .string), "Existing")
@@ -7492,35 +7448,38 @@ final class HotkeyServiceCompatibilityTests: XCTestCase {
     }
 
     @MainActor
-    func testPushToTalkExtraKeyInterruptionSignalsDiscardWithoutImmediateStop() throws {
+    func testPushToTalkIgnoresTabAndSpaceUntilShortcutRelease() throws {
         let service = HotkeyService()
         service.suspendMonitoring()
 
         service.setHotkeyForTesting(commandOptionComboHotkey(), for: .pushToTalk)
-        service.discardPushToTalkRecordingOnExtraKeyPress = true
 
         var startCount = 0
         var stopCount = 0
-        var interruptionCount = 0
         service.onDictationStart = { _ in startCount += 1 }
         service.onDictationStop = { stopCount += 1 }
-        service.onPushToTalkInterruption = { interruptionCount += 1 }
 
         let comboDown = try makeFlagsChangedEvent(keyCode: 0x3D, modifierFlags: [.command, .option])
-        let extraKeyDown = try makeKeyboardEvent(keyCode: 0x25, keyDown: true, flags: [.maskCommand, .maskAlternate])
-        let extraKeyUp = try makeKeyboardEvent(keyCode: 0x25, keyDown: false, flags: [.maskCommand, .maskAlternate])
+        let tabDown = try makeKeyboardEvent(keyCode: 0x30, keyDown: true, flags: [.maskCommand, .maskAlternate])
+        let tabUp = try makeKeyboardEvent(keyCode: 0x30, keyDown: false, flags: [.maskCommand, .maskAlternate])
+        let spaceDown = try makeKeyboardEvent(keyCode: 0x31, keyDown: true, flags: [.maskCommand, .maskAlternate])
+        let spaceUp = try makeKeyboardEvent(keyCode: 0x31, keyDown: false, flags: [.maskCommand, .maskAlternate])
         let fullRelease = try makeFlagsChangedEvent(keyCode: 0x3D, modifierFlags: [])
 
         XCTAssertTrue(service.processEventForTesting(comboDown, source: .monitor))
         XCTAssertEqual(startCount, 1)
         XCTAssertEqual(stopCount, 0)
 
-        XCTAssertFalse(service.processEventForTesting(extraKeyDown, source: .monitor))
-        XCTAssertEqual(interruptionCount, 1)
+        XCTAssertFalse(service.processEventForTesting(tabDown, source: .monitor))
         XCTAssertEqual(stopCount, 0)
 
-        XCTAssertFalse(service.processEventForTesting(extraKeyUp, source: .monitor))
-        XCTAssertEqual(interruptionCount, 1)
+        XCTAssertFalse(service.processEventForTesting(tabUp, source: .monitor))
+        XCTAssertEqual(stopCount, 0)
+
+        XCTAssertFalse(service.processEventForTesting(spaceDown, source: .monitor))
+        XCTAssertEqual(stopCount, 0)
+
+        XCTAssertFalse(service.processEventForTesting(spaceUp, source: .monitor))
         XCTAssertEqual(stopCount, 0)
 
         XCTAssertTrue(service.processEventForTesting(fullRelease, source: .monitor))
@@ -7528,22 +7487,41 @@ final class HotkeyServiceCompatibilityTests: XCTestCase {
     }
 
     @MainActor
-    func testPushToTalkExtraKeyInterruptionDoesNothingWhenPolicyDisabled() throws {
+    func testPushToTalkIgnoresOtherConfiguredShortcutUntilRelease() throws {
         let service = HotkeyService()
         service.suspendMonitoring()
 
         service.setHotkeyForTesting(commandOptionComboHotkey(), for: .pushToTalk)
-        service.discardPushToTalkRecordingOnExtraKeyPress = false
+        service.setHotkeyForTesting(
+            UnifiedHotkey(
+                keyCode: 0x25,
+                modifierFlags: NSEvent.ModifierFlags([.command, .option]).rawValue,
+                isFn: false
+            ),
+            for: .toggle
+        )
 
-        var interruptionCount = 0
-        service.onPushToTalkInterruption = { interruptionCount += 1 }
+        var startCount = 0
+        var stopCount = 0
+        service.onDictationStart = { _ in startCount += 1 }
+        service.onDictationStop = { stopCount += 1 }
 
         let comboDown = try makeFlagsChangedEvent(keyCode: 0x3D, modifierFlags: [.command, .option])
-        let extraKeyDown = try makeKeyboardEvent(keyCode: 0x25, keyDown: true, flags: [.maskCommand, .maskAlternate])
+        let secondaryDown = try makeKeyboardEvent(keyCode: 0x25, keyDown: true, flags: [.maskCommand, .maskAlternate])
+        let secondaryUp = try makeKeyboardEvent(keyCode: 0x25, keyDown: false, flags: [.maskCommand, .maskAlternate])
+        let fullRelease = try makeFlagsChangedEvent(keyCode: 0x3D, modifierFlags: [])
 
         XCTAssertTrue(service.processEventForTesting(comboDown, source: .monitor))
-        XCTAssertFalse(service.processEventForTesting(extraKeyDown, source: .monitor))
-        XCTAssertEqual(interruptionCount, 0)
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(stopCount, 0)
+
+        XCTAssertTrue(service.processEventForTesting(secondaryDown, source: .monitor))
+        XCTAssertTrue(service.processEventForTesting(secondaryUp, source: .monitor))
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(stopCount, 0)
+
+        XCTAssertTrue(service.processEventForTesting(fullRelease, source: .monitor))
+        XCTAssertEqual(stopCount, 1)
     }
 
     @MainActor

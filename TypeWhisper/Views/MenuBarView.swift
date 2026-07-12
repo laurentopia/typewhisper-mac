@@ -7,10 +7,12 @@ import Combine
 private final class MenuBarState: ObservableObject {
     @Published var statusText: String
     @Published var statusImage: String
+    @Published var activeEngineText: String
     @Published var activeModelText: String
     @Published var isModelReady: Bool
     @Published var hasRecentTranscriptions: Bool
     @Published var canCopyLastTranscription: Bool
+    @Published var latestTranscriptionText: String?
     @Published var hasRecoverableRecording: Bool
     @Published var recorderState: AudioRecorderViewModel.RecorderState
     @Published var canToggleRecorder: Bool
@@ -30,9 +32,11 @@ private final class MenuBarState: ObservableObject {
 
         // Set initial values immediately
         self.isModelReady = modelManager.isModelReady
-        let hasRecentTranscriptions = recentTranscriptionStore.latestEntry(historyRecords: historyService.records) != nil
+        let latestTranscriptionText = dictation.latestCompletedTranscriptionText
+        let hasRecentTranscriptions = latestTranscriptionText != nil
         self.hasRecentTranscriptions = hasRecentTranscriptions
         self.canCopyLastTranscription = hasRecentTranscriptions
+        self.latestTranscriptionText = latestTranscriptionText
         self.hasRecoverableRecording = audioRecordingService.latestRecoveryRecordingURL != nil
         self.recorderState = recorder.state
         self.canToggleRecorder = recorder.canToggleRecording
@@ -42,6 +46,7 @@ private final class MenuBarState: ObservableObject {
         let modelStatus = Self.idleModelStatus(from: modelManager)
         self.statusText = modelStatus.text
         self.statusImage = modelStatus.image
+        self.activeEngineText = Self.activeEngineText(from: modelManager)
         self.activeModelText = Self.activeModelText(from: modelManager)
 
         // React to dictation state changes (not audioLevel/duration/partialText)
@@ -64,6 +69,7 @@ private final class MenuBarState: ObservableObject {
                 if case .idle = dictation.state {
                     self.update(state: .idle)
                 }
+                self.activeEngineText = Self.activeEngineText(from: modelManager)
                 self.activeModelText = Self.activeModelText(from: modelManager)
             }
             .store(in: &cancellables)
@@ -127,6 +133,7 @@ private final class MenuBarState: ObservableObject {
             statusImage = modelStatus.image
         }
         isModelReady = modelManager.isModelReady
+        activeEngineText = Self.activeEngineText(from: modelManager)
         activeModelText = Self.activeModelText(from: modelManager)
     }
 
@@ -142,16 +149,20 @@ private final class MenuBarState: ObservableObject {
         return (String(localized: "\(name) selected"), "clock.fill")
     }
 
+    private static func activeEngineText(from modelManager: ModelManagerService) -> String {
+        modelManager.activeEngineName ?? String(localized: "No backend")
+    }
+
     private static func activeModelText(from modelManager: ModelManagerService) -> String {
         modelManager.activeModelName ?? String(localized: "No model")
     }
 
     private func refreshCopyAvailability() {
-        let historyService = ServiceContainer.shared.historyService
-        let recentTranscriptionStore = ServiceContainer.shared.recentTranscriptionStore
-        let hasRecentTranscriptions = recentTranscriptionStore.latestEntry(historyRecords: historyService.records) != nil
+        let latestTranscriptionText = DictationViewModel.shared.latestCompletedTranscriptionText
+        let hasRecentTranscriptions = latestTranscriptionText != nil
         self.hasRecentTranscriptions = hasRecentTranscriptions
         canCopyLastTranscription = hasRecentTranscriptions
+        self.latestTranscriptionText = latestTranscriptionText
     }
 
     private func refreshRecorderToggle(
@@ -240,6 +251,10 @@ struct MenuBarView: View {
 
             menuHeader
 
+            backendMenu
+
+            modelMenu
+
             Label(status.statusText, systemImage: status.statusImage)
 
             Divider()
@@ -290,6 +305,63 @@ struct MenuBarView: View {
             text += " \(channel)"
         }
         return text
+    }
+
+    private var backendMenu: some View {
+        let engines = PluginManager.shared.transcriptionEngines.sorted {
+            $0.providerDisplayName.localizedCaseInsensitiveCompare($1.providerDisplayName) == .orderedAscending
+        }
+        let selectedProviderId = ServiceContainer.shared.modelManagerService.selectedProviderId
+
+        return Menu {
+            if engines.isEmpty {
+                Text(String(localized: "No transcription engines installed"))
+            } else {
+                ForEach(engines, id: \.providerId) { engine in
+                    Button {
+                        ServiceContainer.shared.modelManagerService.selectProvider(engine.providerId)
+                    } label: {
+                        if engine.providerId == selectedProviderId {
+                            Label(engine.providerDisplayName, systemImage: "checkmark")
+                        } else {
+                            Text(engine.providerDisplayName)
+                        }
+                    }
+                    .disabled(!ServiceContainer.shared.modelManagerService.canUseForTranscription(engine))
+                }
+            }
+        } label: {
+            Label("\(String(localized: "Backend")): \(status.activeEngineText)", systemImage: "cpu")
+        }
+    }
+
+    private var modelMenu: some View {
+        let modelManager = ServiceContainer.shared.modelManagerService
+        let providerId = modelManager.selectedProviderId
+        let engine = providerId.flatMap { PluginManager.shared.transcriptionEngine(for: $0) }
+        let models = engine?.transcriptionModels ?? []
+        let selectedModelId = engine?.selectedModelId
+
+        return Menu {
+            if let providerId, !models.isEmpty {
+                ForEach(models, id: \.id) { model in
+                    Button {
+                        modelManager.selectModel(providerId, modelId: model.id)
+                    } label: {
+                        if model.id == selectedModelId {
+                            Label(model.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(model.displayName)
+                        }
+                    }
+                }
+            } else {
+                Text(String(localized: "No models available"))
+            }
+        } label: {
+            Label("\(String(localized: "Model")): \(status.activeModelText)", systemImage: "waveform")
+        }
+        .disabled(providerId == nil || models.isEmpty)
     }
 
     private func openManagedWindow(_ id: String) {
@@ -361,7 +433,21 @@ struct MenuBarView: View {
             Button {
                 DictationViewModel.shared.copyLastTranscriptionToClipboard()
             } label: {
-                Label(String(localized: "Copy Last Transcription"), systemImage: "doc.on.doc")
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Copy Last Transcription"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Text(verbatim: status.latestTranscriptionText ?? "")
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .frame(width: 248, alignment: .leading)
+                } icon: {
+                    Image(systemName: "doc.on.doc")
+                }
             }
             .keyboardShortcut(keyboardShortcut(from: status.copyLastTranscriptionMenuShortcut))
             .disabled(!status.canCopyLastTranscription)

@@ -21042,16 +21042,6 @@
         }
       }
     },
-    "Recording discarded because additional keys were pressed": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "追加のキーが押されたため録音を破棄しました"
-          }
-        }
-      }
-    },
     "Recordings": {
       "localizations": {
         "ja": {
